@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import {
+  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -11,9 +12,14 @@ import { colors, radii, spacing, typography } from "../../theme/tokens";
 import type { VoicePreviewResponse } from "../../features/onboarding/onboarding-api";
 
 export type VoicePreviewPlayerProps = {
-  preview: VoicePreviewResponse;
-  onComplete: () => void;
+  preview: VoicePreviewResponse | null;
+  previewError?: string | null | undefined;
+  isLoadingPreview?: boolean | undefined;
+  onRetryPreview?: (() => void) | undefined;
+  onComplete: () => Promise<void>;
   isCompleting?: boolean | undefined;
+  finishError?: string | null | undefined;
+  isServerReady?: boolean | undefined;
 };
 
 function formatSeconds(sec: number): string {
@@ -24,12 +30,20 @@ function formatSeconds(sec: number): string {
 
 export function VoicePreviewPlayer({
   preview,
+  previewError,
+  isLoadingPreview = false,
+  onRetryPreview,
   onComplete,
-  isCompleting = false
+  isCompleting = false,
+  finishError,
+  isServerReady = true
 }: VoicePreviewPlayerProps) {
-  const audioSource = useMemo(() => ({
-    uri: `data:${preview.mimeType};base64,${preview.audioBase64}`
-  }), [preview.mimeType, preview.audioBase64]);
+  const audioSource = useMemo(() => {
+    if (!preview) return null;
+    return {
+      uri: `data:${preview.mimeType};base64,${preview.audioBase64}`
+    };
+  }, [preview]);
 
   const player = useAudioPlayer(audioSource);
   const status = useAudioPlayerStatus(player);
@@ -51,10 +65,58 @@ export function VoicePreviewPlayer({
     }
   };
 
-  const handleFinish = () => {
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    onComplete();
+  const handleFinish = async () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await onComplete();
   };
+
+  if (previewError) {
+    return (
+      <View style={styles.card} testID="voice-preview-error-view">
+        <View style={styles.errorIcon}>
+          <Text style={{ fontSize: 24 }}>⚠️</Text>
+        </View>
+        <Text style={styles.title}>Voice Preview Unavailable</Text>
+        <View style={styles.errorBox} testID="preview-error-banner">
+          <Text style={styles.errorText} testID="preview-error-message">
+            {previewError}
+          </Text>
+        </View>
+        <Text style={styles.subtitle}>
+          Your voice clone was uploaded, but the audio preview could not be loaded from the server.
+        </Text>
+        {onRetryPreview ? (
+          <Pressable
+            testID="preview-retry-button"
+            onPress={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onRetryPreview();
+            }}
+            style={({ pressed }) => [styles.button, pressed ? styles.buttonPressed : null]}
+            accessibilityRole="button"
+          >
+            <Text style={styles.buttonText}>Retry Loading Preview</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
+
+  if (isLoadingPreview || !preview) {
+    return (
+      <View style={styles.card} testID="voice-preview-loading-view">
+        <View style={styles.spinnerWrapper}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+        <Text style={styles.title}>Loading Voice Preview...</Text>
+        <Text style={styles.subtitle}>
+          Fetching your synthesized voice preview from the server.
+        </Text>
+      </View>
+    );
+  }
+
+  const canFinish = isServerReady && !isCompleting && Boolean(preview.audioBase64);
 
   return (
     <View style={styles.card} testID="voice-preview-player">
@@ -100,6 +162,14 @@ export function VoicePreviewPlayer({
         </View>
       </View>
 
+      {finishError ? (
+        <View style={styles.errorBox} testID="finish-error-banner">
+          <Text style={styles.errorText} testID="finish-error-message">
+            {finishError}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.confirmationBox}>
         <Text style={styles.confirmationText}>
           Your Shield Number is active and configured with this voice profile.
@@ -108,17 +178,21 @@ export function VoicePreviewPlayer({
 
       <Pressable
         testID="complete-onboarding-button"
-        onPress={handleFinish}
-        disabled={isCompleting}
+        onPress={() => void handleFinish()}
+        disabled={!canFinish}
         style={({ pressed }) => [
           styles.completeButton,
-          pressed && !isCompleting ? styles.buttonPressed : null,
-          isCompleting ? styles.buttonDisabled : null
+          pressed && canFinish ? styles.buttonPressed : null,
+          !canFinish ? styles.buttonDisabled : null
         ]}
         accessibilityRole="button"
         accessibilityLabel="Finish Onboarding"
       >
-        <Text style={styles.completeButtonText}>Finish Onboarding</Text>
+        {isCompleting ? (
+          <ActivityIndicator color={colors.surface} size="small" />
+        ) : (
+          <Text style={styles.completeButtonText}>Finish Onboarding</Text>
+        )}
       </Pressable>
     </View>
   );
@@ -137,6 +211,24 @@ const styles = StyleSheet.create({
   header: {
     alignItems: "center",
     gap: spacing.xs
+  },
+  errorIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: radii.pill,
+    backgroundColor: "#FDE8E8",
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "center"
+  },
+  spinnerWrapper: {
+    width: 52,
+    height: 52,
+    borderRadius: radii.pill,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "center"
   },
   successBadge: {
     backgroundColor: colors.primarySoft,
@@ -213,6 +305,20 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontVariant: ["tabular-nums"]
   },
+  errorBox: {
+    backgroundColor: "#FDE8E8",
+    borderColor: colors.danger,
+    borderWidth: 1,
+    borderRadius: radii.sm,
+    padding: spacing.sm,
+    width: "100%"
+  },
+  errorText: {
+    color: colors.danger,
+    fontSize: typography.caption,
+    fontWeight: "500",
+    textAlign: "center"
+  },
   confirmationBox: {
     backgroundColor: colors.primarySoft,
     borderRadius: radii.sm,
@@ -225,6 +331,14 @@ const styles = StyleSheet.create({
     fontSize: typography.caption,
     textAlign: "center",
     fontWeight: "500"
+  },
+  button: {
+    backgroundColor: colors.primary,
+    borderRadius: radii.sm,
+    paddingVertical: spacing.md,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: spacing.xs
   },
   completeButton: {
     backgroundColor: colors.primary,
@@ -239,7 +353,12 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.98 }]
   },
   buttonDisabled: {
-    opacity: 0.6
+    opacity: 0.5
+  },
+  buttonText: {
+    color: colors.surface,
+    fontSize: typography.body,
+    fontWeight: "600"
   },
   completeButtonText: {
     color: colors.surface,

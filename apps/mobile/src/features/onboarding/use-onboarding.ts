@@ -28,6 +28,16 @@ import {
   validateVoiceRecordingDuration
 } from "./validation";
 
+async function deleteLocalAudioFile(uri: string | null): Promise<void> {
+  if (!uri || !uri.startsWith("file://")) return;
+  try {
+    const FileSystem = await import("expo-file-system/legacy");
+    await FileSystem.deleteAsync(uri, { idempotent: true });
+  } catch {
+    // Ignore local cleanup error
+  }
+}
+
 export function useOnboarding() {
   const [step, setStep] = useState<OnboardingStep>("profile");
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -48,8 +58,10 @@ export function useOnboarding() {
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [durationError, setDurationError] = useState<string | null>(null);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
+  const recordingUriRef = useRef<string | null>(null);
 
   // Audio Recorder from expo-audio
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -62,20 +74,39 @@ export function useOnboarding() {
 
   // Preview state
   const [previewData, setPreviewData] = useState<VoicePreviewResponse | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
 
-  // Load Voice Preview
+  // Completion state
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [finishError, setFinishError] = useState<string | null>(null);
+
+  // Keep recordingUriRef in sync for cleanup
+  useEffect(() => {
+    recordingUriRef.current = recordingUri;
+  }, [recordingUri]);
+
+  // Clean up recording file on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingUriRef.current) {
+        void deleteLocalAudioFile(recordingUriRef.current);
+      }
+    };
+  }, []);
+
+  // Load Voice Preview - fails closed, never substitutes synthetic audio
   const loadPreview = useCallback(async () => {
     setIsLoadingPreview(true);
+    setPreviewError(null);
     try {
       const preview = await fetchVoicePreview();
       setPreviewData(preview);
-    } catch {
-      // Fallback synthetic preview audio for testing or fake providers
-      setPreviewData({
-        audioBase64: "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
-        mimeType: "audio/wav"
-      });
+    } catch (err) {
+      setPreviewData(null);
+      const msg = err instanceof Error ? err.message : "Failed to load voice preview";
+      setPreviewError(msg);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       setIsLoadingPreview(false);
     }
@@ -142,6 +173,10 @@ export function useOnboarding() {
           setStep("voice_cloning");
           setCloneStatus("failed");
           setCloneError("Previous voice clone failed. Please retry or record a new sample.");
+        } else if (data.voice.status === "processing") {
+          setStep("voice_cloning");
+          setCloneStatus("processing");
+          void pollVoiceStatus();
         } else {
           setStep("voice_consent");
         }
@@ -153,7 +188,7 @@ export function useOnboarding() {
     } finally {
       setIsLoadingMe(false);
     }
-  }, [loadPreview]);
+  }, [loadPreview]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     void loadMe();
@@ -177,7 +212,7 @@ export function useOnboarding() {
     }
   }, []);
 
-  // Stop recording internal helper
+  // Stop recording internal helper - fails closed, never fabricates a URI
   const handleStopRecordingInternal = useCallback(async () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -200,7 +235,13 @@ export function useOnboarding() {
     );
     setDurationSeconds(finalDuration);
 
-    const uri = audioRecorder.uri ?? recorderState.url ?? `file:///mock-sample-${Date.now()}.m4a`;
+    const uri = audioRecorder.uri ?? recorderState.url;
+    if (!uri) {
+      setRecordingUri(null);
+      setDurationError("Failed to access recorded audio file. Please try recording again.");
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return;
+    }
     setRecordingUri(uri);
 
     // Validate duration: 60s to 180s
@@ -214,17 +255,25 @@ export function useOnboarding() {
     }
   }, [audioRecorder, durationSeconds, recorderState.durationMillis, recorderState.url]);
 
-  // Start Recording
+  // Start Recording - fails closed if prepare or record fails
   const handleStartRecording = useCallback(async () => {
     setDurationError(null);
-    setRecordingUri(null);
+    setRecordingError(null);
+    if (recordingUri) {
+      void deleteLocalAudioFile(recordingUri);
+      setRecordingUri(null);
+    }
     setDurationSeconds(0);
 
     try {
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record({ forDuration: MAX_RECORDING_SECONDS });
-    } catch {
-      // Allow fallback if running in test environment
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start microphone recording";
+      setRecordingError(msg);
+      setIsRecording(false);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return;
     }
 
     setIsRecording(true);
@@ -239,14 +288,14 @@ export function useOnboarding() {
         void handleStopRecordingInternal();
       }
     }, 250);
-  }, [audioRecorder, handleStopRecordingInternal]);
+  }, [audioRecorder, handleStopRecordingInternal, recordingUri]);
 
   // Stop Recording
   const handleStopRecording = useCallback(async () => {
     await handleStopRecordingInternal();
   }, [handleStopRecordingInternal]);
 
-  // Reset / Re-record
+  // Reset / Re-record with safe local cleanup
   const handleResetRecording = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -254,9 +303,13 @@ export function useOnboarding() {
     }
     setIsRecording(false);
     setDurationSeconds(0);
+    if (recordingUri) {
+      void deleteLocalAudioFile(recordingUri);
+    }
     setRecordingUri(null);
     setDurationError(null);
-  }, []);
+    setRecordingError(null);
+  }, [recordingUri]);
 
   // Clean up timer on unmount
   useEffect(() => {
@@ -267,7 +320,46 @@ export function useOnboarding() {
     };
   }, []);
 
-  // Upload Voice Sample & Clone
+  // Poll voice processing status with bounded retries
+  const pollVoiceStatus = useCallback(
+    async (maxAttempts = 30, intervalMs = 1000) => {
+      setCloneStatus("processing");
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        try {
+          const currentMe = await fetchOwnerMe();
+          setMe(currentMe);
+
+          if (currentMe.voice.status === "ready") {
+            setCloneStatus("ready");
+            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            setStep("voice_preview");
+            await loadPreview();
+            return;
+          }
+
+          if (currentMe.voice.status === "failed") {
+            setCloneStatus("failed");
+            setCloneError("Voice clone processing failed on server. Please retry.");
+            setIsRetryable(currentMe.voice.retryable);
+            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+            return;
+          }
+        } catch {
+          // ignore transient poll error and retry next cycle
+        }
+      }
+
+      // Timed out
+      setCloneStatus("failed");
+      setCloneError("Voice clone processing timed out. Please retry.");
+      setIsRetryable(true);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    },
+    [loadPreview]
+  );
+
+  // Upload Voice Sample & Clone - handles processing polling and failure cleanly
   const handleUploadClone = useCallback(async () => {
     if (!recordingUri) {
       setDurationError("No recording found. Please record a voice sample first.");
@@ -289,7 +381,6 @@ export function useOnboarding() {
     setCloneError(null);
 
     try {
-      setCloneStatus("processing");
       const cloneResponse = await uploadVoiceSample({
         fileUri: recordingUri,
         durationSeconds: Math.round(durationSeconds),
@@ -300,18 +391,23 @@ export function useOnboarding() {
 
       if (cloneResponse.voice.status === "failed") {
         setCloneStatus("failed");
-        setCloneError("Voice cloning failed. Please retry.");
+        setCloneError("Voice clone generation failed. Please retry.");
         setIsRetryable(cloneResponse.voice.retryable);
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
         return;
       }
 
-      setCloneStatus("ready");
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (cloneResponse.voice.status === "processing") {
+        await pollVoiceStatus();
+        return;
+      }
 
-      // Fetch preview
-      setStep("voice_preview");
-      void loadPreview();
+      if (cloneResponse.voice.status === "ready") {
+        setCloneStatus("ready");
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setStep("voice_preview");
+        await loadPreview();
+      }
     } catch (err) {
       setCloneStatus("failed");
       const message = err instanceof Error ? err.message : "Voice clone upload failed";
@@ -319,7 +415,46 @@ export function useOnboarding() {
       setIsRetryable(true);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }
-  }, [durationSeconds, hasConsent, loadPreview, recordingUri]);
+  }, [durationSeconds, hasConsent, loadPreview, pollVoiceStatus, recordingUri]);
+
+  // Complete onboarding with server confirmation
+  const completeOnboarding = useCallback(async (): Promise<boolean> => {
+    if (!previewData || !previewData.audioBase64) {
+      setFinishError("Cannot complete onboarding: voice preview has not loaded.");
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return false;
+    }
+
+    setIsFinishing(true);
+    setFinishError(null);
+
+    try {
+      const currentMe = await fetchOwnerMe();
+      setMe(currentMe);
+
+      if (currentMe.voice.status !== "ready" && currentMe.onboarding.status !== "complete") {
+        setFinishError(
+          "Cannot complete onboarding: server has not confirmed your voice clone is ready."
+        );
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        return false;
+      }
+
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (recordingUri) {
+        void deleteLocalAudioFile(recordingUri);
+      }
+      return true;
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to verify onboarding completion with server";
+      setFinishError(msg);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return false;
+    } finally {
+      setIsFinishing(false);
+    }
+  }, [previewData, recordingUri]);
 
   return {
     step,
@@ -346,6 +481,7 @@ export function useOnboarding() {
     durationSeconds,
     recordingUri,
     durationError,
+    recordingError,
     handleStartRecording,
     handleStopRecording,
     handleResetRecording,
@@ -355,10 +491,17 @@ export function useOnboarding() {
     cloneError,
     isRetryable,
     handleUploadClone,
+    pollVoiceStatus,
 
     // Preview
     previewData,
+    previewError,
     isLoadingPreview,
-    loadPreview
+    loadPreview,
+
+    // Finish
+    completeOnboarding,
+    isFinishing,
+    finishError
   };
 }

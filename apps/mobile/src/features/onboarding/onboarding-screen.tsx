@@ -48,6 +48,7 @@ export function OnboardingScreen() {
     durationSeconds,
     recordingUri,
     durationError,
+    recordingError,
     handleStartRecording,
     handleStopRecording,
     handleResetRecording,
@@ -59,7 +60,15 @@ export function OnboardingScreen() {
     handleUploadClone,
 
     // Preview
-    previewData
+    previewData,
+    previewError,
+    isLoadingPreview,
+    loadPreview,
+
+    // Finish
+    completeOnboarding,
+    isFinishing,
+    finishError
   } = useOnboarding();
 
   const getStepIndex = (): number => {
@@ -76,8 +85,11 @@ export function OnboardingScreen() {
     }
   };
 
-  const handleFinishOnboarding = () => {
-    router.replace("/(app)");
+  const handleFinishOnboarding = async () => {
+    const success = await completeOnboarding();
+    if (success) {
+      router.replace("/(app)");
+    }
   };
 
   if (isLoadingMe) {
@@ -105,6 +117,7 @@ export function OnboardingScreen() {
   }
 
   const shieldNumber = me?.shieldNumber ?? "+14155550199";
+  const isServerReady = me?.voice.status === "ready" || me?.onboarding.status === "complete";
 
   return (
     <KeyboardAvoidingView
@@ -163,6 +176,7 @@ export function OnboardingScreen() {
               durationSeconds={durationSeconds}
               recordingUri={recordingUri}
               durationError={durationError}
+              recordingError={recordingError}
               onStartRecording={handleStartRecording}
               onStopRecording={handleStopRecording}
               onResetRecording={handleResetRecording}
@@ -183,10 +197,16 @@ export function OnboardingScreen() {
             />
           )}
 
-          {(step === "voice_preview" || step === "complete") && previewData && (
+          {(step === "voice_preview" || step === "complete") && (
             <VoicePreviewPlayer
               preview={previewData}
+              previewError={previewError}
+              isLoadingPreview={isLoadingPreview}
+              onRetryPreview={() => void loadPreview()}
               onComplete={handleFinishOnboarding}
+              isCompleting={isFinishing}
+              finishError={finishError}
+              isServerReady={isServerReady}
             />
           )}
         </Animated.View>

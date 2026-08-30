@@ -27,6 +27,7 @@ export type RecordingControlsProps = {
   durationSeconds: number;
   recordingUri: string | null;
   durationError: string | null;
+  recordingError?: string | null | undefined;
   onStartRecording: () => Promise<void>;
   onStopRecording: () => Promise<void>;
   onResetRecording: () => void;
@@ -46,6 +47,7 @@ export function RecordingControls({
   durationSeconds,
   recordingUri,
   durationError,
+  recordingError,
   onStartRecording,
   onStopRecording,
   onResetRecording,
@@ -161,6 +163,14 @@ export function RecordingControls({
           <Text style={styles.progressSubtext}>180s max</Text>
         </View>
 
+        {recordingError ? (
+          <View style={styles.errorBox} testID="recording-error-banner">
+            <Text style={styles.errorText} testID="recording-error-message">
+              {recordingError}
+            </Text>
+          </View>
+        ) : null}
+
         {durationError ? (
           <View style={styles.errorBox} testID="duration-error-banner">
             <Text style={styles.errorText} testID="duration-error-message">
@@ -246,7 +256,9 @@ export function RecordingControls({
             accessibilityRole="button"
             accessibilityLabel="Start Recording"
           >
-            <Text style={styles.buttonText}>Start Recording (60-180s)</Text>
+            <Text style={styles.buttonText}>
+              {recordingError ? "Retry Recording" : "Start Recording (60-180s)"}
+            </Text>
           </Pressable>
         )}
       </View>
