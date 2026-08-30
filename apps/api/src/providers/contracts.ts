@@ -1,4 +1,5 @@
 import type { RiskAssessment, TranscriptTurn } from "@call-screener/contracts";
+import type { Readable } from "node:stream";
 
 export type ScreeningContext = {
   ownerName: string;
@@ -15,7 +16,9 @@ export interface VoiceCloneProvider {
   createClone(input: {
     name: string;
     mimeType: string;
-    sample: NodeJS.ReadableStream;
+    /** Narrowed to Node's concrete Readable (not the looser NodeJS.ReadableStream) so it
+     *  type-checks directly against the ElevenLabs SDK's Uploadable file-like union. */
+    sample: Readable;
   }): Promise<{ voiceId: string }>;
   createPreview(input: { voiceId: string; text: string }): Promise<{ audio: Uint8Array; mimeType: "audio/mpeg" | "audio/wav" }>;
 }
@@ -26,7 +29,9 @@ export interface ConversationProvider {
     ownerName: string;
     voiceId: string;
     language: "en" | "hi";
-  }): Promise<{ conversationId: string; websocketUrl: string }>;
+    fromNumber: string;
+    toNumber: string;
+  }): Promise<{ twiml: string }>;
 }
 
 export interface TelephonyProvider {
