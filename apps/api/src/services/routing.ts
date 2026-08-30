@@ -46,3 +46,20 @@ export function resolveConversationLanguage(shieldNumber: string): "en" | "hi" {
   const parsed = parsePhoneNumberFromString(shieldNumber);
   return parsed?.country === "IN" ? "hi" : "en";
 }
+
+const PRIVATE_NUMBER_SENTINELS = new Set(["anonymous", "restricted", "unavailable", "unknown", "private"]);
+
+/**
+ * True for a caller number this server can't safely screen or call back: Twilio's own
+ * "caller ID withheld" sentinels, or anything libphonenumber can't parse as a real number.
+ * An unknown caller behind a private number never reaches AI screening — there's no
+ * identity to build a risk assessment against and no number to transfer or call back.
+ */
+export function isPrivateNumber(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || PRIVATE_NUMBER_SENTINELS.has(normalized)) {
+    return true;
+  }
+  const parsed = parsePhoneNumberFromString(value);
+  return !(parsed?.isValid() ?? false);
+}

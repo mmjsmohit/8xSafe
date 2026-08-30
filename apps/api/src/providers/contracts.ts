@@ -26,7 +26,9 @@ export interface ConversationProvider {
     ownerName: string;
     voiceId: string;
     language: "en" | "hi";
-  }): Promise<{ conversationId: string; websocketUrl: string }>;
+    fromNumber: string;
+    toNumber: string;
+  }): Promise<{ twiml: string }>;
 }
 
 export interface TelephonyProvider {

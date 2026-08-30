@@ -4,7 +4,9 @@ import type { RiskSignal } from "../src/services/screening.js";
 import { evaluateTransfer, executeTransfer } from "../src/services/transfer.js";
 
 const cleanSignals: RiskSignal[] = [{ type: "UNSOLICITED_MARKETING", confidence: 0.9, evidence: "selling something" }];
-const hardSignals: RiskSignal[] = [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.85, evidence: "asked to install software" }];
+// Deliberately low confidence: a hard signal blocks a transfer at any confidence, no threshold.
+const hardSignals: RiskSignal[] = [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.05, evidence: "asked to install software" }];
+const publicApiUrl = "https://api.example.com";
 
 describe("evaluateTransfer", () => {
   it("allows a transfer with clean signals and a forwarding number on file", () => {
@@ -34,7 +36,7 @@ describe("evaluateTransfer", () => {
 });
 
 function fakeTelephony() {
-  const redirectCall = vi.fn(() => Promise.resolve());
+  const redirectCall = vi.fn<TelephonyProvider["redirectCall"]>(() => Promise.resolve());
   const telephony: TelephonyProvider = { redirectCall };
   return { telephony, redirectCall };
 }
@@ -46,22 +48,27 @@ describe("executeTransfer", () => {
       callSid: "CA123",
       callerId: "+14155559999",
       forwardingNumber: "+14155550000",
-      signals: cleanSignals
+      signals: cleanSignals,
+      publicApiUrl
     });
     expect(outcome).toEqual({ status: "initiated" });
     expect(redirectCall).toHaveBeenCalledTimes(1);
-    const call = redirectCall.mock.calls[0]?.[0] as { callSid: string; twiml: string };
-    expect(call.callSid).toBe("CA123");
-    expect(call.twiml).toContain("+14155550000");
+    const [call] = redirectCall.mock.calls[0] ?? [];
+    expect(call?.callSid).toBe("CA123");
+    expect(call?.twiml).toContain("+14155550000");
+    expect(call?.twiml).toContain('timeout="20"');
+    expect(call?.twiml).toContain("https://api.example.com/webhooks/twilio/dial-complete");
+    expect(call?.twiml).toContain("https://api.example.com/webhooks/twilio/call-status");
   });
 
-  it("never calls the telephony provider when a hard signal is present", async () => {
+  it("never calls the telephony provider when a hard signal is present, even at low confidence", async () => {
     const { telephony, redirectCall } = fakeTelephony();
     const outcome = await executeTransfer(telephony, {
       callSid: "CA123",
       callerId: "+14155559999",
       forwardingNumber: "+14155550000",
-      signals: hardSignals
+      signals: hardSignals,
+      publicApiUrl
     });
     expect(outcome).toEqual({ status: "rejected", reason: "hard_signal" });
     expect(redirectCall).not.toHaveBeenCalled();
@@ -73,7 +80,8 @@ describe("executeTransfer", () => {
       callSid: "CA123",
       callerId: "+14155559999",
       forwardingNumber: null,
-      signals: cleanSignals
+      signals: cleanSignals,
+      publicApiUrl
     });
     expect(outcome).toEqual({ status: "rejected", reason: "missing_forwarding_number" });
     expect(redirectCall).not.toHaveBeenCalled();
@@ -85,7 +93,8 @@ describe("executeTransfer", () => {
       callSid: "CA123",
       callerId: "+14155559999",
       forwardingNumber: "+14155550000",
-      signals: cleanSignals
+      signals: cleanSignals,
+      publicApiUrl
     });
     expect(outcome).toEqual({ status: "failed", reason: "telephony_error" });
   });

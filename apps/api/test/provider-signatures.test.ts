@@ -19,7 +19,7 @@ describe("constantTimeEqual", () => {
 
 describe("verifyTwilioSignature", () => {
   const authToken = "test-auth-token";
-  const url = "https://api.example.com/webhooks/twilio/voice";
+  const url = "https://api.example.com/webhooks/twilio/inbound";
   const params = { CallSid: "CA123", From: "+15551234567", To: "+15557654321" };
 
   it("accepts a signature computed for the exact configured URL and params", () => {
@@ -28,7 +28,7 @@ describe("verifyTwilioSignature", () => {
   });
 
   it("rejects a signature computed for a different URL (e.g. a proxy-inferred host)", () => {
-    const signatureHeader = getExpectedTwilioSignature(authToken, "https://evil.example.com/webhooks/twilio/voice", params);
+    const signatureHeader = getExpectedTwilioSignature(authToken, "https://evil.example.com/webhooks/twilio/inbound", params);
     expect(verifyTwilioSignature({ authToken, url, params, signatureHeader })).toBe(false);
   });
 

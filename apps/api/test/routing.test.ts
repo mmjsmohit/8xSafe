@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideRoute, normalizePhoneNumber, resolveConversationLanguage } from "../src/services/routing.js";
+import { decideRoute, isPrivateNumber, normalizePhoneNumber, resolveConversationLanguage } from "../src/services/routing.js";
 
 describe("normalizePhoneNumber", () => {
   it("passes through an already-E.164 number unchanged", () => {
@@ -49,5 +49,22 @@ describe("resolveConversationLanguage", () => {
 
   it("defaults to English for non-Indian shield numbers", () => {
     expect(resolveConversationLanguage("+14155552671")).toBe("en");
+  });
+});
+
+describe("isPrivateNumber", () => {
+  it("is false for a real, valid E.164 number", () => {
+    expect(isPrivateNumber("+14155552671")).toBe(false);
+  });
+
+  it.each(["anonymous", "ANONYMOUS", "restricted", "unavailable", "unknown", "private", ""])(
+    "is true for the caller-ID-withheld sentinel %j",
+    (value) => {
+      expect(isPrivateNumber(value)).toBe(true);
+    }
+  );
+
+  it("is true for anything libphonenumber can't parse as a real number", () => {
+    expect(isPrivateNumber("not-a-number")).toBe(true);
   });
 });

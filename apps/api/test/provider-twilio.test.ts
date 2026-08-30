@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TwilioClient } from "../src/providers/twilio.js";
 import {
-  buildConnectStreamTwiml,
+  DIAL_RING_TIMEOUT_SECONDS,
   buildDialTwiml,
   buildHangupTwiml,
   buildRejectTwiml,
+  buildUnavailableTwiml,
   createTwilioTelephonyProvider
 } from "../src/providers/twilio.js";
+
+const publicApiUrl = "https://api.example.com";
 
 describe("TwiML builders", () => {
   it("builds a reject response for blocked callers", () => {
@@ -15,24 +18,24 @@ describe("TwiML builders", () => {
     expect(twiml).toContain('reason="rejected"');
   });
 
-  it("builds a dial response with recording explicitly disabled", () => {
-    const twiml = buildDialTwiml({ to: "+14155550000", callerId: "+14155559999" });
-    expect(twiml).toContain("<Dial");
-    expect(twiml).toContain('record="do-not-record"');
-    expect(twiml).toContain('callerId="+14155559999"');
-    expect(twiml).toContain("<Number>+14155550000</Number>");
+  it("builds an unavailable response that says something and hangs up, with no dial or stream", () => {
+    const twiml = buildUnavailableTwiml();
+    expect(twiml).toContain("<Say>");
+    expect(twiml).toContain("<Hangup");
+    expect(twiml).not.toContain("<Dial");
+    expect(twiml).not.toContain("<Connect");
   });
 
-  it("builds a connect/stream response carrying per-call context as custom parameters", () => {
-    const twiml = buildConnectStreamTwiml({
-      websocketUrl: "wss://api.elevenlabs.io/v1/convai/conversation?signature=abc",
-      parameters: { call_id: "call_123", owner_name: "Asha" }
-    });
-    expect(twiml).toContain("<Connect>");
-    expect(twiml).toContain("<Stream");
-    expect(twiml).toContain('url="wss://api.elevenlabs.io/v1/convai/conversation?signature=abc"');
-    expect(twiml).toContain('name="call_id"');
-    expect(twiml).toContain('value="call_123"');
+  it("builds a dial response with recording disabled, a 20s ring timeout, and callback URLs", () => {
+    const twiml = buildDialTwiml({ to: "+14155550000", callerId: "+14155559999", publicApiUrl });
+    expect(twiml).toContain("<Dial");
+    expect(twiml).toContain('record="do-not-record"');
+    expect(twiml).toContain(`timeout="${String(DIAL_RING_TIMEOUT_SECONDS)}"`);
+    expect(twiml).toContain('callerId="+14155559999"');
+    expect(twiml).toContain('action="https://api.example.com/webhooks/twilio/dial-complete"');
+    expect(twiml).toContain('statusCallback="https://api.example.com/webhooks/twilio/call-status"');
+    expect(twiml).toContain('statusCallbackEvent="initiated ringing answered completed"');
+    expect(twiml).toContain(">+14155550000</Number>");
   });
 
   it("builds a hangup response", () => {

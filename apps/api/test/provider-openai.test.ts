@@ -21,45 +21,46 @@ const context = {
   callerTurns: 1
 };
 
-function fakeClient(parse: ReturnType<typeof vi.fn>): Pick<OpenAI, "chat"> {
-  return { chat: { completions: { parse } } } as unknown as Pick<OpenAI, "chat">;
+type ParseCall = (...args: unknown[]) => Promise<{ output_parsed: RiskAssessment | null }>;
+
+function fakeClient(parse: ParseCall): Pick<OpenAI, "responses"> {
+  return { responses: { parse } } as unknown as Pick<OpenAI, "responses">;
 }
 
 describe("createOpenAiRiskAnalyzer", () => {
-  it("returns the parsed structured assessment", async () => {
-    const parse = vi.fn(() =>
-      Promise.resolve({ choices: [{ message: { parsed: assessment, refusal: null } }] })
-    );
+  it("returns the parsed structured assessment via the Responses API", async () => {
+    const parse = vi.fn<ParseCall>(() => Promise.resolve({ output_parsed: assessment }));
     const analyzer = createOpenAiRiskAnalyzer({ apiKey: "test-key" }, fakeClient(parse));
 
     const result = await analyzer.assess(context);
 
     expect(result).toEqual(assessment);
     expect(parse).toHaveBeenCalledTimes(1);
-    const [body, options] = parse.mock.calls[0] as [{ model: string; temperature: number }, { timeout: number }];
-    expect(body.model).toBe("gpt-4.1-mini");
+    const [body, options] = (parse.mock.calls[0] ?? []) as [{ model: string; temperature: number }, { timeout: number }];
+    expect(body.model).toBe("gpt-5.6-luna");
     expect(body.temperature).toBe(0);
-    expect(options.timeout).toBeGreaterThan(0);
+    expect(options.timeout).toBe(8_000);
   });
 
-  it("throws when the model refuses instead of returning a silent bad assessment", async () => {
-    const parse = vi.fn(() =>
-      Promise.resolve({ choices: [{ message: { parsed: undefined, refusal: "cannot help with that" } }] })
-    );
+  it("never lets a caller influence the response format — it is always the server-owned schema", async () => {
+    const parse = vi.fn<ParseCall>(() => Promise.resolve({ output_parsed: assessment }));
     const analyzer = createOpenAiRiskAnalyzer({ apiKey: "test-key" }, fakeClient(parse));
+    await analyzer.assess(context);
 
-    await expect(analyzer.assess(context)).rejects.toThrow();
+    const [body] = (parse.mock.calls[0] ?? []) as [{ text: { format: { name: string; type: string } } }];
+    expect(body.text.format.type).toBe("json_schema");
+    expect(body.text.format.name).toBe("risk_assessment");
   });
 
-  it("throws when there is no parsed output at all", async () => {
-    const parse = vi.fn(() => Promise.resolve({ choices: [{ message: { parsed: undefined, refusal: null } }] }));
+  it("throws when the response has no parsed output (refusal, incomplete, or otherwise)", async () => {
+    const parse = vi.fn<ParseCall>(() => Promise.resolve({ output_parsed: null }));
     const analyzer = createOpenAiRiskAnalyzer({ apiKey: "test-key" }, fakeClient(parse));
 
     await expect(analyzer.assess(context)).rejects.toThrow();
   });
 
   it("propagates a timeout/transport error from the client", async () => {
-    const parse = vi.fn(() => Promise.reject(new Error("request timed out")));
+    const parse = vi.fn<ParseCall>(() => Promise.reject(new Error("request timed out")));
     const analyzer = createOpenAiRiskAnalyzer({ apiKey: "test-key" }, fakeClient(parse));
 
     await expect(analyzer.assess(context)).rejects.toThrow("request timed out");

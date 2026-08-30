@@ -1,14 +1,13 @@
+import type { TransferStatus } from "@call-screener/contracts";
 import { eq } from "drizzle-orm";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
+import type { AppConfig } from "../config.js";
 import type { Database } from "../db/client.js";
-import { blockedCallers, calls, conversations, phoneNumbers, trustedCallers, users, webhookEvents } from "../db/schema.js";
+import { calls, jobs, phoneNumbers, trustedCallers, blockedCallers, users, webhookEvents } from "../db/schema.js";
 import { verifyElevenLabsSignature, verifyTwilioSignature } from "../providers/signatures.js";
-import { buildConnectStreamTwiml, buildDialTwiml, buildRejectTwiml } from "../providers/twilio.js";
-import { decideRoute, normalizePhoneNumber, resolveConversationLanguage } from "../services/routing.js";
-
-/** Used only if a caller reaches an owner who has not finished voice enrollment yet. */
-const FALLBACK_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+import { buildDialTwiml, buildHangupTwiml, buildRejectTwiml, buildUnavailableTwiml } from "../providers/twilio.js";
+import { decideRoute, isPrivateNumber, normalizePhoneNumber, resolveConversationLanguage } from "../services/routing.js";
 
 const twilioVoiceParamsSchema = z.object({
   CallSid: z.string().min(1),
@@ -16,34 +15,72 @@ const twilioVoiceParamsSchema = z.object({
   To: z.string().min(1)
 });
 
+const twilioCallStatusParamsSchema = z.object({
+  CallSid: z.string().min(1),
+  CallStatus: z.string().min(1)
+});
+
+const twilioDialCompleteParamsSchema = z.object({
+  CallSid: z.string().min(1),
+  DialCallStatus: z.string().min(1)
+});
+
+const elevenLabsPostCallEventSchema = z.object({
+  conversation_id: z.string().min(1)
+});
+
 function firstHeaderValue(header: string | string[] | undefined): string | undefined {
   return Array.isArray(header) ? header[0] : header;
 }
 
-const elevenLabsPostCallSchema = z.object({
-  conversation_id: z.string().min(1),
-  transcript: z
-    .array(
-      z.object({
-        role: z.enum(["agent", "user"]),
-        message: z.string().nullable().optional()
-      })
-    )
-    .optional(),
-  analysis: z
-    .object({
-      transcript_summary: z.string().nullable().optional()
-    })
-    .optional()
-});
+function verifyTwilioWebhookRequest(request: FastifyRequest, config: AppConfig, path: string): boolean {
+  if (!config.TWILIO_AUTH_TOKEN) {
+    return false;
+  }
+  const url = new URL(path, config.PUBLIC_API_URL).toString();
+  const signatureHeader = firstHeaderValue(request.headers["x-twilio-signature"]);
+  return verifyTwilioSignature({
+    authToken: config.TWILIO_AUTH_TOKEN,
+    url,
+    params: request.body as Record<string, string>,
+    signatureHeader
+  });
+}
+
+type OwnerRow = typeof users.$inferSelect;
+
+/** Onboarding is only "complete" once the owner has a forwarding number and a ready cloned voice. */
+function isOwnerReadyForScreening(owner: OwnerRow): boolean {
+  return (
+    owner.displayName !== null &&
+    owner.forwardingNumber !== null &&
+    owner.voiceStatus === "ready" &&
+    owner.voiceId !== null
+  );
+}
+
+const CALL_STATUS_TO_TRANSFER_STATUS: Partial<Record<string, TransferStatus>> = {
+  initiated: "initiated",
+  ringing: "ringing",
+  "in-progress": "answered",
+  completed: "completed"
+};
+
+const DIAL_CALL_STATUS_TO_TRANSFER_STATUS: Partial<Record<string, TransferStatus>> = {
+  completed: "completed",
+  busy: "busy",
+  failed: "failed",
+  "no-answer": "no_answer",
+  canceled: "failed"
+};
 
 // eslint-disable-next-line @typescript-eslint/require-await -- FastifyPluginAsync must return a Promise; all awaits live in the route handlers registered below.
 export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
   const { config, db, providers } = app.dependencies;
 
-  app.post("/webhooks/twilio/voice", async (request, reply) => {
-    if (!config.TWILIO_AUTH_TOKEN) {
-      return reply.code(503).send();
+  app.post("/webhooks/twilio/inbound", async (request, reply) => {
+    if (!verifyTwilioWebhookRequest(request, config, "/webhooks/twilio/inbound")) {
+      return reply.code(403).send();
     }
 
     const parsedParams = twilioVoiceParamsSchema.safeParse(request.body);
@@ -51,18 +88,6 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send();
     }
     const params = parsedParams.data;
-
-    const webhookUrl = new URL("/webhooks/twilio/voice", config.PUBLIC_API_URL).toString();
-    const signatureHeader = firstHeaderValue(request.headers["x-twilio-signature"]);
-    const signatureValid = verifyTwilioSignature({
-      authToken: config.TWILIO_AUTH_TOKEN,
-      url: webhookUrl,
-      params: request.body as Record<string, string>,
-      signatureHeader
-    });
-    if (!signatureValid) {
-      return reply.code(403).send();
-    }
 
     const [phoneNumber] = await db
       .select()
@@ -112,7 +137,24 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
       return buildRejectTwiml();
     }
 
-    if (route.kind === "trusted" && owner.forwardingNumber) {
+    if (route.kind === "trusted") {
+      if (!owner.forwardingNumber) {
+        // Trusted creates only basic call metadata and a direct dial — never AI. Without a
+        // forwarding number there is nothing to dial, so the call is unavailable, full stop.
+        await recordCall(db, {
+          ownerId: owner.id,
+          phoneNumberId: phoneNumber.id,
+          twilioCallSid: params.CallSid,
+          callerNumber: normalizedFrom,
+          calledNumber: params.To,
+          category: "trusted",
+          outcome: "unavailable",
+          completedAt: new Date()
+        });
+        reply.type("text/xml");
+        return buildUnavailableTwiml();
+      }
+
       await recordCall(db, {
         ownerId: owner.id,
         phoneNumberId: phoneNumber.id,
@@ -124,11 +166,28 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
         transferStatus: "initiated"
       });
       reply.type("text/xml");
-      return buildDialTwiml({ to: owner.forwardingNumber, callerId: params.To });
+      return buildDialTwiml({ to: owner.forwardingNumber, callerId: params.To, publicApiUrl: config.PUBLIC_API_URL });
     }
 
-    // Unknown caller: hand off to the AI screening agent.
-    const call = await recordCall(db, {
+    // Unknown caller: AI screening requires a fully onboarded owner with a ready cloned
+    // voice, and a caller number this server can actually identify. Any of those missing
+    // means unavailable — never a provider registration, conversation, or risk assessment.
+    if (!isOwnerReadyForScreening(owner) || isPrivateNumber(params.From)) {
+      await recordCall(db, {
+        ownerId: owner.id,
+        phoneNumberId: phoneNumber.id,
+        twilioCallSid: params.CallSid,
+        callerNumber: normalizedFrom,
+        calledNumber: params.To,
+        category: "unknown",
+        outcome: "unavailable",
+        completedAt: new Date()
+      });
+      reply.type("text/xml");
+      return buildUnavailableTwiml();
+    }
+
+    const { call, isNew } = await recordCall(db, {
       ownerId: owner.id,
       phoneNumberId: phoneNumber.id,
       twilioCallSid: params.CallSid,
@@ -138,23 +197,65 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
       outcome: "processing"
     });
 
-    const { conversationId, websocketUrl } = await providers.conversations.registerCall({
+    if (!isNew) {
+      // A duplicate delivery for a CallSid we've already registered a provider conversation
+      // for must never register a second one — decline gracefully instead.
+      reply.type("text/xml");
+      return buildUnavailableTwiml();
+    }
+
+    // owner.voiceId is guaranteed non-null by isOwnerReadyForScreening above.
+    const voiceId = owner.voiceId;
+    if (voiceId === null) {
+      throw new Error("owner_voice_id_missing_after_readiness_check");
+    }
+
+    const { twiml } = await providers.conversations.registerCall({
       callId: call.id,
       ownerName: owner.displayName ?? "the owner",
-      voiceId: owner.voiceStatus === "ready" && owner.voiceId ? owner.voiceId : FALLBACK_VOICE_ID,
-      language: resolveConversationLanguage(params.To)
+      voiceId,
+      language: resolveConversationLanguage(params.To),
+      fromNumber: params.From,
+      toNumber: params.To
     });
-
-    await db
-      .insert(conversations)
-      .values({ callId: call.id, elevenLabsConversationId: conversationId })
-      .onConflictDoNothing({ target: conversations.callId });
 
     reply.type("text/xml");
-    return buildConnectStreamTwiml({
-      websocketUrl,
-      parameters: { call_id: call.id, owner_name: owner.displayName ?? "the owner" }
-    });
+    return twiml;
+  });
+
+  app.post("/webhooks/twilio/call-status", async (request, reply) => {
+    if (!verifyTwilioWebhookRequest(request, config, "/webhooks/twilio/call-status")) {
+      return reply.code(403).send();
+    }
+    const parsed = twilioCallStatusParamsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send();
+    }
+    const transferStatus = CALL_STATUS_TO_TRANSFER_STATUS[parsed.data.CallStatus];
+    if (transferStatus !== undefined) {
+      await db.update(calls).set({ transferStatus }).where(eq(calls.twilioCallSid, parsed.data.CallSid));
+    }
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.post("/webhooks/twilio/dial-complete", async (request, reply) => {
+    if (!verifyTwilioWebhookRequest(request, config, "/webhooks/twilio/dial-complete")) {
+      return reply.code(403).send();
+    }
+    const parsed = twilioDialCompleteParamsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send();
+    }
+    const transferStatus = DIAL_CALL_STATUS_TO_TRANSFER_STATUS[parsed.data.DialCallStatus] ?? "failed";
+    await db
+      .update(calls)
+      .set({
+        transferStatus,
+        outcome: transferStatus === "completed" ? "connected" : "missed_transfer"
+      })
+      .where(eq(calls.twilioCallSid, parsed.data.CallSid));
+    reply.type("text/xml");
+    return buildHangupTwiml();
   });
 
   app.post(
@@ -176,47 +277,32 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(403).send();
       }
 
-      const parsedBody = elevenLabsPostCallSchema.safeParse(request.body);
-      if (!parsedBody.success) {
+      const parsedEvent = elevenLabsPostCallEventSchema.safeParse(request.body);
+      if (!parsedEvent.success) {
         return reply.code(400).send();
       }
-      const payload = parsedBody.data;
 
-      const [conversation] = await db
-        .select()
-        .from(conversations)
-        .where(eq(conversations.elevenLabsConversationId, payload.conversation_id))
-        .limit(1);
-      if (!conversation) {
-        // Nothing to reconcile — the conversation was never registered by this server.
-        return reply.code(200).send({ ok: true });
-      }
-
-      const alreadyProcessed = await isDuplicateWebhookEvent(db, "elevenlabs", payload.conversation_id);
-      if (alreadyProcessed) {
-        return reply.code(200).send({ ok: true });
-      }
-
-      const transcript = (payload.transcript ?? []).map((turn) => ({
-        speaker: turn.role === "agent" ? ("assistant" as const) : ("caller" as const),
-        text: turn.message ?? "",
-        occurredAt: null
-      }));
-
-      await db
-        .update(conversations)
-        .set({
-          transcript,
-          turnCount: transcript.length,
-          summary: payload.analysis?.transcript_summary ?? null,
-          updatedAt: new Date()
-        })
-        .where(eq(conversations.id, conversation.id));
-
-      await db
-        .update(calls)
-        .set({ completedAt: new Date() })
-        .where(eq(calls.id, conversation.callId));
+      // Never touch `conversations`/`calls` from this handler: the payload is durably
+      // queued and reconciled asynchronously so a duplicate or out-of-order delivery is
+      // always idempotent and never races the call's own inbound/screening writes.
+      await db.transaction(async (tx) => {
+        const inserted = await tx
+          .insert(webhookEvents)
+          .values({
+            provider: "elevenlabs",
+            eventKey: parsedEvent.data.conversation_id,
+            eventType: "post_call_transcription"
+          })
+          .onConflictDoNothing({ target: [webhookEvents.provider, webhookEvents.eventKey] })
+          .returning();
+        if (inserted.length === 0) {
+          return;
+        }
+        await tx.insert(jobs).values({
+          type: "elevenlabs_post_call",
+          payload: request.body
+        });
+      });
 
       return reply.code(200).send({ ok: true });
     }
@@ -232,35 +318,22 @@ async function recordCall(
     callerNumber: string;
     calledNumber: string;
     category: "unknown" | "trusted";
-    outcome: "blocked" | "direct_forward" | "processing";
+    outcome: "blocked" | "direct_forward" | "processing" | "unavailable";
     transferStatus?: "initiated";
     completedAt?: Date;
   }
-) {
+): Promise<{ call: typeof calls.$inferSelect; isNew: boolean }> {
   const inserted = await db
     .insert(calls)
     .values(values)
     .onConflictDoNothing({ target: calls.twilioCallSid })
     .returning();
   if (inserted[0]) {
-    return inserted[0];
+    return { call: inserted[0], isNew: true };
   }
   const [existing] = await db.select().from(calls).where(eq(calls.twilioCallSid, values.twilioCallSid)).limit(1);
   if (!existing) {
     throw new Error("call_upsert_failed");
   }
-  return existing;
-}
-
-async function isDuplicateWebhookEvent(
-  db: Database,
-  provider: string,
-  eventKey: string
-): Promise<boolean> {
-  const inserted = await db
-    .insert(webhookEvents)
-    .values({ provider, eventKey, eventType: "post-call" })
-    .onConflictDoNothing({ target: [webhookEvents.provider, webhookEvents.eventKey] })
-    .returning();
-  return inserted.length === 0;
+  return { call: existing, isNew: false };
 }

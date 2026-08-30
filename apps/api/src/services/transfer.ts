@@ -42,6 +42,7 @@ export async function executeTransfer(
     callerId: string;
     forwardingNumber: string | null;
     signals: readonly RiskSignal[];
+    publicApiUrl: string;
   }
 ): Promise<TransferOutcome> {
   const decision = evaluateTransfer({ signals: input.signals, forwardingNumber: input.forwardingNumber });
@@ -56,7 +57,7 @@ export async function executeTransfer(
     return { status: "rejected", reason: "missing_forwarding_number" };
   }
 
-  const twiml = buildDialTwiml({ to: forwardingNumber, callerId: input.callerId });
+  const twiml = buildDialTwiml({ to: forwardingNumber, callerId: input.callerId, publicApiUrl: input.publicApiUrl });
   try {
     await telephony.redirectCall({ callSid: input.callSid, twiml });
     return { status: "initiated" };

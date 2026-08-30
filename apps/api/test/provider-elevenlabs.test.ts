@@ -1,11 +1,12 @@
 import { Readable } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CONVERSATION_LLM_MODEL,
   TELEPHONY_AUDIO_FORMAT,
-  appendConversationOverrides,
+  buildAgentBaselineConfig,
   buildAgentToolDefinitions,
-  buildConversationOverrides,
+  buildConversationInitiationClientData,
+  buildFirstDisclosureMessage,
   createElevenLabsProviders,
   type ElevenLabsSdkClient
 } from "../src/providers/elevenlabs.js";
@@ -17,53 +18,90 @@ const config = {
   agentToolSecret: "shared-secret"
 };
 
-describe("buildConversationOverrides", () => {
-  it("pins the ElevenLabs-hosted OpenAI model and telephony audio format", () => {
-    const overrides = buildConversationOverrides({ ownerName: "Asha", voiceId: "voice_1", language: "en", callId: "call_1" });
-    expect(overrides.conversationConfigOverride.agent.prompt.llm).toBe(CONVERSATION_LLM_MODEL);
-    expect(overrides.conversationConfigOverride.tts.agentOutputAudioFormat).toBe(TELEPHONY_AUDIO_FORMAT);
-    expect(overrides.conversationConfigOverride.tts.voiceId).toBe("voice_1");
+describe("buildFirstDisclosureMessage", () => {
+  it("discloses the caller is speaking with an AI assistant, not the owner, in English", () => {
+    const message = buildFirstDisclosureMessage({ ownerName: "Asha", language: "en" });
+    expect(message).toContain("Asha");
+    expect(message.toLowerCase()).toContain("ai");
   });
 
-  it("switches to the Hindi/Hinglish language override when requested", () => {
-    const overrides = buildConversationOverrides({ ownerName: "Asha", voiceId: "voice_1", language: "hi", callId: "call_1" });
-    expect(overrides.conversationConfigOverride.agent.language).toBe("hi");
-    expect(overrides.dynamicVariables.languageStyle).toBe("hindi_or_hinglish");
-  });
-
-  it("defaults to English when no Hindi override is requested", () => {
-    const overrides = buildConversationOverrides({ ownerName: "Asha", voiceId: "voice_1", language: "en", callId: "call_1" });
-    expect(overrides.conversationConfigOverride.agent.language).toBe("en");
-    expect(overrides.dynamicVariables.languageStyle).toBe("english");
+  it("switches to a Hindi/Hinglish disclosure when requested", () => {
+    const message = buildFirstDisclosureMessage({ ownerName: "Asha", language: "hi" });
+    expect(message).toContain("Asha");
+    expect(message.toLowerCase()).toContain("ai");
   });
 });
 
-describe("appendConversationOverrides", () => {
-  it("attaches the overrides as a JSON query parameter without losing existing params", () => {
-    const overrides = buildConversationOverrides({ ownerName: "Asha", voiceId: "voice_1", language: "en", callId: "call_1" });
-    const url = appendConversationOverrides("wss://api.elevenlabs.io/v1/convai/conversation?signature=abc", overrides);
-    const parsed = new URL(url);
-    expect(parsed.searchParams.get("signature")).toBe("abc");
-    expect(JSON.parse(parsed.searchParams.get("conversation_initiation_client_data") ?? "{}")).toEqual(overrides);
+describe("buildConversationInitiationClientData", () => {
+  it("pins the ElevenLabs-hosted OpenAI model, the cloned voice, and call_id/owner_name dynamic variables", () => {
+    const data = buildConversationInitiationClientData({
+      callId: "call_1",
+      ownerName: "Asha",
+      voiceId: "voice_1",
+      language: "en"
+    });
+    expect(data.conversationConfigOverride?.agent?.prompt?.llm).toBe(CONVERSATION_LLM_MODEL);
+    expect(data.conversationConfigOverride?.tts?.voiceId).toBe("voice_1");
+    expect(data.conversationConfigOverride?.agent?.language).toBe("en");
+    expect(data.dynamicVariables).toEqual({ call_id: "call_1", owner_name: "Asha" });
+  });
+
+  it("never sets an audio-format field on the per-call override", () => {
+    const data = buildConversationInitiationClientData({
+      callId: "call_1",
+      ownerName: "Asha",
+      voiceId: "voice_1",
+      language: "en"
+    });
+    expect(JSON.stringify(data)).not.toMatch(/audio.?format/i);
+    expect(JSON.stringify(data)).not.toContain(TELEPHONY_AUDIO_FORMAT);
+  });
+
+  it("sets an exact, server-owned first disclosure message and switches language to hi", () => {
+    const data = buildConversationInitiationClientData({
+      callId: "call_1",
+      ownerName: "Asha",
+      voiceId: "voice_1",
+      language: "hi"
+    });
+    expect(data.conversationConfigOverride?.agent?.language).toBe("hi");
+    expect(data.conversationConfigOverride?.agent?.firstMessage).toBe(
+      buildFirstDisclosureMessage({ ownerName: "Asha", language: "hi" })
+    );
   });
 });
 
 describe("buildAgentToolDefinitions", () => {
-  it("points both tools at this server with the shared secret header, never a caller-visible value", () => {
-    const [screen, transfer] = buildAgentToolDefinitions(config);
-    expect(screen.apiSchema.url).toBe("https://api.example.com/agent-tools/screen");
-    expect(screen.apiSchema.method).toBe("POST");
-    expect(screen.apiSchema.requestHeaders).toEqual({ "X-Agent-Tool-Secret": "shared-secret" });
-    expect(transfer.apiSchema.url).toBe("https://api.example.com/agent-tools/transfer");
-    expect(transfer.apiSchema.requestHeaders).toEqual({ "X-Agent-Tool-Secret": "shared-secret" });
+  it("defines exactly one webhook tool, pointed at /agent-tools/screen-call with the shared secret header", () => {
+    const tools = buildAgentToolDefinitions(config);
+    expect(tools).toHaveLength(1);
+    const [screenCall] = tools;
+    expect(screenCall.apiSchema.url).toBe("https://api.example.com/agent-tools/screen-call");
+    expect(screenCall.apiSchema.method).toBe("POST");
+    expect(screenCall.apiSchema.requestHeaders).toEqual({ "X-Agent-Tool-Secret": "shared-secret" });
   });
 });
+
+describe("buildAgentBaselineConfig", () => {
+  it("is the only place ulaw_8000 appears, and carries the webhook tool + disabled recording", () => {
+    const baseline = buildAgentBaselineConfig(config);
+    expect(baseline.conversationConfig.tts.agentOutputAudioFormat).toBe(TELEPHONY_AUDIO_FORMAT);
+    expect(baseline.conversationConfig.asr.userInputAudioFormat).toBe(TELEPHONY_AUDIO_FORMAT);
+    expect(baseline.conversationConfig.agent.prompt.llm).toBe(CONVERSATION_LLM_MODEL);
+    expect(baseline.conversationConfig.agent.prompt.tools).toHaveLength(1);
+    expect(baseline.platformSettings.privacy.recordVoice).toBe(false);
+  });
+});
+
+const registerCallMock = vi.fn<ElevenLabsSdkClient["conversationalAi"]["twilio"]["registerCall"]>(() =>
+  Promise.resolve('<Response><Connect><Stream url="wss://api.elevenlabs.io/fake"/></Connect></Response>')
+);
 
 function fakeClient(overrides: Partial<ElevenLabsSdkClient> = {}): ElevenLabsSdkClient {
   return {
     conversationalAi: {
-      conversations: {
-        getSignedUrl: vi.fn(() => Promise.resolve({ signedUrl: "wss://api.elevenlabs.io/v1/convai/conversation?conversation_id=conv_generated" }))
+      twilio: {
+        registerCall: registerCallMock
       }
     },
     voices: {
@@ -86,29 +124,37 @@ function fakeClient(overrides: Partial<ElevenLabsSdkClient> = {}): ElevenLabsSdk
 }
 
 describe("createElevenLabsProviders", () => {
-  it("registers a call and returns the conversation id embedded in the signed URL", async () => {
+  beforeEach(() => {
+    registerCallMock.mockClear();
+  });
+
+  it("registers a call through the official ElevenLabs Twilio integration and returns its TwiML verbatim", async () => {
     const client = fakeClient();
     const provider = createElevenLabsProviders(config, client);
 
-    const result = await provider.registerCall({ callId: "call_1", ownerName: "Asha", voiceId: "voice_1", language: "en" });
-
-    expect(result.conversationId).toBe("conv_generated");
-    expect(result.websocketUrl).toContain("conversation_initiation_client_data=");
-  });
-
-  it("falls back to the call id when the signed URL carries no conversation id", async () => {
-    const client = fakeClient({
-      conversationalAi: {
-        conversations: {
-          getSignedUrl: vi.fn(() => Promise.resolve({ signedUrl: "wss://api.elevenlabs.io/v1/convai/conversation" }))
-        }
-      }
+    const result = await provider.registerCall({
+      callId: "call_1",
+      ownerName: "Asha",
+      voiceId: "voice_1",
+      language: "en",
+      fromNumber: "+14155559999",
+      toNumber: "+14155550000"
     });
-    const provider = createElevenLabsProviders(config, client);
 
-    const result = await provider.registerCall({ callId: "call_fallback", ownerName: "Asha", voiceId: "voice_1", language: "en" });
-
-    expect(result.conversationId).toBe("call_fallback");
+    expect(result.twiml).toContain("wss://api.elevenlabs.io/fake");
+    expect(registerCallMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "agent_123",
+        fromNumber: "+14155559999",
+        toNumber: "+14155550000",
+        direction: "inbound"
+      })
+    );
+    const [request] = registerCallMock.mock.calls[0] ?? [];
+    expect(request?.conversationInitiationClientData?.dynamicVariables).toEqual({
+      call_id: "call_1",
+      owner_name: "Asha"
+    });
   });
 
   it("creates a voice clone from the enrollment sample", async () => {

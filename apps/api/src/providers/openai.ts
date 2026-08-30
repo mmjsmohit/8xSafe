@@ -1,10 +1,15 @@
 import { riskAssessmentSchema, type RiskAssessment } from "@call-screener/contracts";
 import OpenAI from "openai";
-import { zodResponseFormat } from "openai/helpers/zod";
+import { zodTextFormat } from "openai/helpers/zod";
 import type { RiskAnalyzer, ScreeningContext } from "./contracts.js";
 
-/** Small, fast, structured-output-capable model — screening must stay low latency. */
-const SCREENING_MODEL = "gpt-4.1-mini";
+/**
+ * Screening model — server-owned and fixed, never influenced by caller input. This is
+ * the same identifier used for the live ElevenLabs conversation (see providers/elevenlabs.ts
+ * `CONVERSATION_LLM_MODEL`), kept as a separate constant here because this call goes
+ * directly to OpenAI rather than through ElevenLabs' hosted routing.
+ */
+const SCREENING_MODEL = "gpt-5.6-luna";
 /** Hard ceiling on a single screening call so a slow model never stalls a live phone call. */
 const SCREENING_TIMEOUT_MS = 8_000;
 const RESPONSE_FORMAT_NAME = "risk_assessment";
@@ -18,14 +23,11 @@ Read the transcript so far and produce a single structured risk assessment. Be c
   of a scam call and must never be waved through.
 - Distinguish a legitimate, useful reason for calling (delivery update, appointment, a real business
   matter) from vague, evasive, or high-pressure language.
-- Only recommend CONNECT_TO_USER when the caller's identity and purpose are credible and there is no
-  credential or remote-access risk signal.
-- Recommend TAKE_MESSAGE when the purpose is legitimate but does not need to interrupt the owner right now.
-- Recommend BLOCK_CALL or END_CALL for clear scams, and MARK_AS_MARKETING / MARK_AS_SUSPICIOUS /
-  MARK_AS_SCAM to categorize the call even when you also end it.
-- Ask ASK_MORE_QUESTIONS with a concrete nextQuestion whenever intent or identity is still unclear.
+- Set usefulReason only when the caller has given a concrete, verifiable reason for the call.
+- Ask a concrete nextQuestion whenever intent or identity is still unclear.
 
-Output only the structured fields — no extra commentary.`;
+Output only the structured fields — no extra commentary. The server, not you, makes the final
+routing decision from these fields; recommendedAction is advisory only.`;
 
 export type OpenAiRiskAnalyzerConfig = {
   apiKey: string;
@@ -42,15 +44,15 @@ function formatTranscript(context: ScreeningContext): string {
 
 export function createOpenAiRiskAnalyzer(
   config: OpenAiRiskAnalyzerConfig,
-  client: Pick<OpenAI, "chat"> = new OpenAI({ apiKey: config.apiKey })
+  client: Pick<OpenAI, "responses"> = new OpenAI({ apiKey: config.apiKey })
 ): RiskAnalyzer {
   return {
     async assess(context: ScreeningContext): Promise<RiskAssessment> {
-      const completion = await client.chat.completions.parse(
+      const response = await client.responses.parse(
         {
           model: SCREENING_MODEL,
           temperature: 0,
-          messages: [
+          input: [
             { role: "system", content: SYSTEM_PROMPT },
             {
               role: "user",
@@ -63,17 +65,16 @@ export function createOpenAiRiskAnalyzer(
               ].join("\n")
             }
           ],
-          response_format: zodResponseFormat(riskAssessmentSchema, RESPONSE_FORMAT_NAME)
+          text: { format: zodTextFormat(riskAssessmentSchema, RESPONSE_FORMAT_NAME) }
         },
         { timeout: SCREENING_TIMEOUT_MS }
       );
 
-      const message = completion.choices[0]?.message;
-      if (!message || message.refusal || !message.parsed) {
+      if (response.output_parsed === null) {
         throw new Error("openai_screening_invalid_output");
       }
 
-      return message.parsed;
+      return response.output_parsed;
     }
   };
 }

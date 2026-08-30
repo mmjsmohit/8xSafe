@@ -4,7 +4,7 @@ export function createFakeProviders(): Providers {
   return {
     conversations: {
       registerCall() {
-        return Promise.resolve({ conversationId: "fake-conversation", websocketUrl: "wss://example.invalid/fake" });
+        return Promise.resolve({ twiml: "<Response><Say>Fake conversation</Say></Response>" });
       }
     },
     push: {
