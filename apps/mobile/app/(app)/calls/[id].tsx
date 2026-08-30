@@ -1,6 +1,13 @@
-import { Text, View } from "react-native";
+import { Stack, useLocalSearchParams } from "expo-router";
+import { CallDetailScreen } from "../../../src/features/calls/call-detail-screen";
 
-export default function CallDetailScreen() {
-  return <View><Text>Call details</Text></View>;
+export default function CallDetailRoute() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+
+  return (
+    <>
+      <Stack.Screen options={{ headerLargeTitle: false, title: "Call details" }} />
+      <CallDetailScreen callId={typeof id === "string" ? id : ""} />
+    </>
+  );
 }
-
