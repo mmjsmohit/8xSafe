@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { createHmac } from "node:crypto";
-import { validateRequest } from "twilio";
+import twilio from "twilio";
 
 /**
  * Compares two secrets in constant time, tolerating different lengths so callers
@@ -36,7 +36,7 @@ export function verifyTwilioSignature(input: TwilioSignatureInput): boolean {
   if (!input.signatureHeader) {
     return false;
   }
-  return validateRequest(input.authToken, input.signatureHeader, input.url, input.params);
+  return twilio.validateRequest(input.authToken, input.signatureHeader, input.url, input.params);
 }
 
 export type ElevenLabsSignatureInput = {
