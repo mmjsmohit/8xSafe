@@ -12,7 +12,7 @@ export default tseslint.config(
     languageOptions: {
       globals: { ...globals.node, ...globals.browser },
       parserOptions: {
-        projectService: { allowDefaultProject: ["apps/api/*.config.ts"] },
+        projectService: { allowDefaultProject: ["apps/api/*.config.ts", "apps/api/test/*.ts"] },
         tsconfigRootDir: import.meta.dirname
       }
     },
