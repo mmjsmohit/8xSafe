@@ -109,14 +109,39 @@ describe("decideScreeningAction", () => {
     expect(decideScreeningAction({ assessment: result, elapsedSeconds: 0, callerTurns: 0 })).not.toBe("CONNECT_TO_USER");
   });
 
-  it("never connects when a hard signal is present, even if every other condition is met", () => {
+  it("deterministically blocks (not just refuses to connect) on a hard signal, even at low confidence and with every other condition otherwise connect-eligible", () => {
     const result = assessment({
       riskScore: 0,
       confidence: 1,
       usefulReason: "Delivery confirmation",
-      signals: [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.05, evidence: "asked to install software" }]
+      signals: [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.05, evidence: "asked me to install AnyDesk" }]
     });
-    expect(decideScreeningAction({ assessment: result, elapsedSeconds: 0, callerTurns: 0 })).not.toBe("CONNECT_TO_USER");
+    expect(decideScreeningAction({ assessment: result, elapsedSeconds: 0, callerTurns: 0 })).toBe("BLOCK_CALL");
+  });
+
+  it.each([
+    "OTP_REQUEST",
+    "PASSWORD_REQUEST",
+    "UPI_PIN_REQUEST",
+    "CARD_CREDENTIAL_REQUEST",
+    "REMOTE_ACCESS_REQUEST",
+    "SCREEN_SHARING_REQUEST"
+  ] as const)("blocks on a %s signal at any confidence, not just above a threshold", (type) => {
+    const result = assessment({
+      riskScore: 0.1,
+      confidence: 0.9,
+      usefulReason: "Sounds legitimate",
+      signals: [{ type, confidence: 0.01, evidence: "low-confidence mention" }]
+    });
+    expect(decideScreeningAction({ assessment: result, elapsedSeconds: 0, callerTurns: 0 })).toBe("BLOCK_CALL");
+  });
+
+  it("still ends the call for marketing even when a hard signal is also present", () => {
+    const result = assessment({
+      recommendedAction: "MARK_AS_MARKETING",
+      signals: [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.9, evidence: "AnyDesk" }]
+    });
+    expect(decideScreeningAction({ assessment: result, elapsedSeconds: 0, callerTurns: 0 })).toBe("MARK_AS_MARKETING");
   });
 
   it(`takes a message once elapsed seconds reach ${String(MAX_SCREENING_ELAPSED_SECONDS)}, overriding the "ask more" default`, () => {

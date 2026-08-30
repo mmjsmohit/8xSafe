@@ -36,10 +36,22 @@ describe("createOpenAiRiskAnalyzer", () => {
 
     expect(result).toEqual(assessment);
     expect(parse).toHaveBeenCalledTimes(1);
-    const [body, options] = (parse.mock.calls[0] ?? []) as [{ model: string; temperature: number }, { timeout: number }];
+    const [body, options] = (parse.mock.calls[0] ?? []) as [
+      { model: string; temperature: number; store: boolean },
+      { timeout: number }
+    ];
     expect(body.model).toBe("gpt-5.6-luna");
     expect(body.temperature).toBe(0);
     expect(options.timeout).toBe(8_000);
+  });
+
+  it("never lets OpenAI retain the screening payload — store is always false", async () => {
+    const parse = vi.fn<ParseCall>(() => Promise.resolve({ output_parsed: assessment }));
+    const analyzer = createOpenAiRiskAnalyzer({ apiKey: "test-key" }, fakeClient(parse));
+    await analyzer.assess(context);
+
+    const [body] = (parse.mock.calls[0] ?? []) as [{ store: boolean }];
+    expect(body.store).toBe(false);
   });
 
   it("never lets a caller influence the response format — it is always the server-owned schema", async () => {

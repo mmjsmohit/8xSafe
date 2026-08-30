@@ -63,11 +63,15 @@ export type ScreeningTurnResult = {
  * evaluated in a fixed priority order so the same inputs always produce the same action:
  *
  * 1. Marketing calls always end.
- * 2. A risk score at or above `BLOCK_RISK_THRESHOLD` always blocks, independent of everything else.
- * 3. Connecting requires ALL of: no hard signal at any confidence, risk below `CONNECT_RISK_THRESHOLD`,
- *    confidence at or above `CONNECT_CONFIDENCE_THRESHOLD`, and a non-empty `usefulReason`.
- * 4. Once the call has run long enough or had enough caller turns, stop asking and take a message.
- * 5. Otherwise, keep asking.
+ * 2. A hard credential/remote-access/screen-sharing signal, at any confidence, always
+ *    blocks the call outright — this is not merely a bar on connecting, it's a decisive
+ *    scam signal (e.g. an AnyDesk/remote-access request) independent of the risk score.
+ * 3. A risk score at or above `BLOCK_RISK_THRESHOLD` also blocks, independent of everything else.
+ * 4. Connecting requires ALL of: risk below `CONNECT_RISK_THRESHOLD`, confidence at or
+ *    above `CONNECT_CONFIDENCE_THRESHOLD`, and a non-empty `usefulReason` (a hard signal
+ *    already exited via step 2, so it can never reach here).
+ * 5. Once the call has run long enough or had enough caller turns, stop asking and take a message.
+ * 6. Otherwise, keep asking.
  */
 export function decideScreeningAction(input: {
   assessment: RiskAssessment;
@@ -80,12 +84,15 @@ export function decideScreeningAction(input: {
     return "MARK_AS_MARKETING";
   }
 
+  if (hasHardSignal(assessment.signals)) {
+    return "BLOCK_CALL";
+  }
+
   if (assessment.riskScore >= BLOCK_RISK_THRESHOLD) {
     return "BLOCK_CALL";
   }
 
   const canConnect =
-    !hasHardSignal(assessment.signals) &&
     assessment.riskScore < CONNECT_RISK_THRESHOLD &&
     assessment.confidence >= CONNECT_CONFIDENCE_THRESHOLD &&
     assessment.usefulReason !== null &&

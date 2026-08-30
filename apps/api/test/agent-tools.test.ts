@@ -103,18 +103,20 @@ describe("POST /agent-tools/screen-call screening + auto-transfer", () => {
     expect(callsUpdate?.values).toMatchObject({ outcome: "connected", transferStatus: "initiated" });
   });
 
-  it("never connects when this turn's assessment carries a hard signal, even at low confidence", async () => {
+  it("deterministically blocks (not just refuses to connect) on a hard signal at low confidence, matching an AnyDesk-style remote-access request", async () => {
     const hardSignalAssessment = assessment({
       ...connectEligible,
-      signals: [{ type: "OTP_REQUEST", confidence: 0.05, evidence: "asked for a code" }]
+      signals: [{ type: "REMOTE_ACCESS_REQUEST", confidence: 0.05, evidence: "asked me to install AnyDesk" }]
     });
-    const { response, mocks } = await callScreenCall({
+    const { response, mocks, updates } = await callScreenCall({
       dbSetup: { tables: tableRows([[calls, [callRow]], [users, [owner]], [riskSignals, []]]) },
       providerOverrides: { risk: { assess: vi.fn(() => Promise.resolve(hardSignalAssessment)) } }
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).not.toMatchObject({ result: { action: "CONNECT_TO_USER" } });
+    expect(response.json()).toMatchObject({ result: { action: "BLOCK_CALL" } });
     expect(mocks.redirectCall).not.toHaveBeenCalled();
+    const callsUpdate = updates.find((entry) => entry.table === calls);
+    expect(callsUpdate?.values).toMatchObject({ outcome: "blocked" });
   });
 
   it("ends the call for marketing and never transfers", async () => {

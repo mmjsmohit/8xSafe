@@ -19,16 +19,18 @@ const config = {
 };
 
 describe("buildFirstDisclosureMessage", () => {
-  it("discloses the caller is speaking with an AI assistant, not the owner, in English", () => {
+  it("is exactly the required English disclosure, with the real owner name interpolated", () => {
     const message = buildFirstDisclosureMessage({ ownerName: "Asha", language: "en" });
-    expect(message).toContain("Asha");
-    expect(message.toLowerCase()).toContain("ai");
+    expect(message).toBe(
+      "Hi, you've reached Asha's AI call assistant. I transcribe this screening conversation. Please tell me your name and what you're calling about."
+    );
   });
 
-  it("switches to a Hindi/Hinglish disclosure when requested", () => {
+  it("discloses both AI and transcription in the Hindi/Hinglish version, with the real owner name interpolated", () => {
     const message = buildFirstDisclosureMessage({ ownerName: "Asha", language: "hi" });
     expect(message).toContain("Asha");
     expect(message.toLowerCase()).toContain("ai");
+    expect(message.toLowerCase()).toContain("transcribe");
   });
 });
 
@@ -73,12 +75,36 @@ describe("buildConversationInitiationClientData", () => {
 
 describe("buildAgentToolDefinitions", () => {
   it("defines exactly one webhook tool, pointed at /agent-tools/screen-call with the shared secret header", () => {
-    const tools = buildAgentToolDefinitions(config);
-    expect(tools).toHaveLength(1);
-    const [screenCall] = tools;
-    expect(screenCall.apiSchema.url).toBe("https://api.example.com/agent-tools/screen-call");
-    expect(screenCall.apiSchema.method).toBe("POST");
-    expect(screenCall.apiSchema.requestHeaders).toEqual({ "X-Agent-Tool-Secret": "shared-secret" });
+    const [screenCall] = buildAgentToolDefinitions(config);
+    expect(screenCall?.apiSchema.url).toBe("https://api.example.com/agent-tools/screen-call");
+    expect(screenCall?.apiSchema.method).toBe("POST");
+    expect(screenCall?.apiSchema.requestHeaders).toEqual({ "X-Agent-Tool-Secret": "shared-secret" });
+  });
+
+  it("populates call_id from the server-owned call_id dynamic variable — never left for the LLM to fill in", () => {
+    const [screenCall] = buildAgentToolDefinitions(config);
+    const schema = screenCall?.apiSchema.requestBodySchema;
+    expect(schema?.type).toBe("object");
+    expect(schema?.required).toEqual(expect.arrayContaining(["call_id", "transcript"]));
+    const callId = schema?.properties?.call_id;
+    // dynamicVariable (populated by the platform) is mutually exclusive with description
+    // (which is what lets the LLM choose the value) — asserting both proves the LLM has
+    // no path to spoof a different call's id.
+    expect(callId).toMatchObject({ type: "string", dynamicVariable: "call_id" });
+    expect(callId).not.toHaveProperty("description");
+  });
+
+  it("requires transcript as an array of caller/assistant turns matching what the screen-call route accepts", () => {
+    const [screenCall] = buildAgentToolDefinitions(config);
+    const schema = screenCall?.apiSchema.requestBodySchema;
+    const transcript = schema?.properties?.transcript as
+      | { type?: string; items?: { type?: string; required?: string[]; properties?: Record<string, unknown> } }
+      | undefined;
+    expect(transcript?.type).toBe("array");
+    expect(transcript?.items?.type).toBe("object");
+    expect(transcript?.items?.required).toEqual(expect.arrayContaining(["speaker", "text"]));
+    expect(transcript?.items?.properties?.speaker).toMatchObject({ enum: ["assistant", "caller"] });
+    expect(transcript?.items?.properties?.text).toMatchObject({ type: "string" });
   });
 });
 
@@ -93,11 +119,19 @@ describe("buildAgentBaselineConfig", () => {
   });
 });
 
-const registerCallMock = vi.fn<ElevenLabsSdkClient["conversationalAi"]["twilio"]["registerCall"]>(() =>
+type RegisterCallRequest = {
+  agentId: string;
+  fromNumber: string;
+  toNumber: string;
+  direction?: string;
+  conversationInitiationClientData?: { dynamicVariables?: Record<string, unknown> };
+};
+
+const registerCallMock = vi.fn<(request: RegisterCallRequest) => Promise<string>>(() =>
   Promise.resolve('<Response><Connect><Stream url="wss://api.elevenlabs.io/fake"/></Connect></Response>')
 );
 
-function fakeClient(overrides: Partial<ElevenLabsSdkClient> = {}): ElevenLabsSdkClient {
+function fakeClient(): ElevenLabsSdkClient {
   return {
     conversationalAi: {
       twilio: {
@@ -118,9 +152,10 @@ function fakeClient(overrides: Partial<ElevenLabsSdkClient> = {}): ElevenLabsSdk
           })
         )
       )
-    },
-    ...overrides
-  };
+    }
+    // The real SDK's client classes carry many more members than this test needs to fake;
+    // this double only needs to satisfy the calls createElevenLabsProviders actually makes.
+  } as unknown as ElevenLabsSdkClient;
 }
 
 describe("createElevenLabsProviders", () => {

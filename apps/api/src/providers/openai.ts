@@ -52,6 +52,9 @@ export function createOpenAiRiskAnalyzer(
         {
           model: SCREENING_MODEL,
           temperature: 0,
+          // Screening transcripts are sensitive by nature (they can carry the caller's
+          // attempted credential/PII phishing) — never retained by OpenAI for this request.
+          store: false,
           input: [
             { role: "system", content: SYSTEM_PROMPT },
             {

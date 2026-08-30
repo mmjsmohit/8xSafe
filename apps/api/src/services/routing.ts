@@ -39,11 +39,15 @@ export function decideRoute(callerNumber: string, lists: CallerLists): CallRoute
 
 /**
  * Picks the screening agent's spoken language. The owner has no stored language
- * preference (not part of this app's schema), so this defaults to the shield number's
- * own country: Indian numbers get Hindi/Hinglish, everything else stays English.
+ * preference (not part of this app's schema), so this is resolved from the owner's own
+ * *forwarding* number, not the shield number — the shield number is always a Twilio
+ * number in whatever country it was provisioned in (e.g. a US number for every owner),
+ * while the forwarding number is the owner's real personal number and so is the only
+ * signal that actually reflects their locale. Indian forwarding numbers get
+ * Hindi/Hinglish; everything else stays English.
  */
-export function resolveConversationLanguage(shieldNumber: string): "en" | "hi" {
-  const parsed = parsePhoneNumberFromString(shieldNumber);
+export function resolveConversationLanguage(forwardingNumber: string): "en" | "hi" {
+  const parsed = parsePhoneNumberFromString(forwardingNumber);
   return parsed?.country === "IN" ? "hi" : "en";
 }
 

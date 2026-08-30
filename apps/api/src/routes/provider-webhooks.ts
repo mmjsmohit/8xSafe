@@ -17,7 +17,11 @@ const twilioVoiceParamsSchema = z.object({
 
 const twilioCallStatusParamsSchema = z.object({
   CallSid: z.string().min(1),
-  CallStatus: z.string().min(1)
+  CallStatus: z.string().min(1),
+  // Twilio's <Number statusCallback> fires on the dialed *child* leg, whose own CallSid is
+  // not the call row we stored — ParentCallSid (when present) is the original inbound
+  // call's sid and takes precedence; see the lookup below.
+  ParentCallSid: z.string().min(1).optional()
 });
 
 const twilioDialCompleteParamsSchema = z.object({
@@ -31,6 +35,16 @@ const elevenLabsPostCallEventSchema = z.object({
 
 function firstHeaderValue(header: string | string[] | undefined): string | undefined {
   return Array.isArray(header) ? header[0] : header;
+}
+
+/**
+ * Twilio's `<Number statusCallback>` fires on the dialed *child* leg, whose own `CallSid`
+ * is not the row this server stored (that's the original inbound call). When the callback
+ * carries `ParentCallSid` — the original call's sid — that's what must be used to find the
+ * right `calls` row; `CallSid` is only a fallback for callbacks that never had a parent.
+ */
+export function resolveTwilioCallbackSid(params: { CallSid: string; ParentCallSid?: string | undefined }): string {
+  return params.ParentCallSid ?? params.CallSid;
 }
 
 function verifyTwilioWebhookRequest(request: FastifyRequest, config: AppConfig, path: string): boolean {
@@ -49,9 +63,13 @@ function verifyTwilioWebhookRequest(request: FastifyRequest, config: AppConfig, 
 
 type OwnerRow = typeof users.$inferSelect;
 
-/** Onboarding is only "complete" once the owner has a forwarding number and a ready cloned voice. */
+/**
+ * Onboarding is only "complete" once the owner has finished the onboarding flow itself
+ * (`onboardingCompletedAt`), has a forwarding number, and has a ready cloned voice.
+ */
 function isOwnerReadyForScreening(owner: OwnerRow): boolean {
   return (
+    owner.onboardingCompletedAt !== null &&
     owner.displayName !== null &&
     owner.forwardingNumber !== null &&
     owner.voiceStatus === "ready" &&
@@ -204,17 +222,21 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
       return buildUnavailableTwiml();
     }
 
-    // owner.voiceId is guaranteed non-null by isOwnerReadyForScreening above.
-    const voiceId = owner.voiceId;
-    if (voiceId === null) {
-      throw new Error("owner_voice_id_missing_after_readiness_check");
+    // voiceId and forwardingNumber are both guaranteed non-null by isOwnerReadyForScreening
+    // above; re-checked here rather than asserted so a future readiness-check change can't
+    // silently desync from what's actually used.
+    const { voiceId, forwardingNumber } = owner;
+    if (voiceId === null || forwardingNumber === null) {
+      throw new Error("owner_not_ready_after_readiness_check");
     }
 
     const { twiml } = await providers.conversations.registerCall({
       callId: call.id,
       ownerName: owner.displayName ?? "the owner",
       voiceId,
-      language: resolveConversationLanguage(params.To),
+      // Resolved from the owner's own forwarding number, not the shield number — the
+      // shield number is a US Twilio number regardless of the owner's actual locale.
+      language: resolveConversationLanguage(forwardingNumber),
       fromNumber: params.From,
       toNumber: params.To
     });
@@ -233,7 +255,8 @@ export const providerWebhookRoutes: FastifyPluginAsync = async (app) => {
     }
     const transferStatus = CALL_STATUS_TO_TRANSFER_STATUS[parsed.data.CallStatus];
     if (transferStatus !== undefined) {
-      await db.update(calls).set({ transferStatus }).where(eq(calls.twilioCallSid, parsed.data.CallSid));
+      const callSid = resolveTwilioCallbackSid(parsed.data);
+      await db.update(calls).set({ transferStatus }).where(eq(calls.twilioCallSid, callSid));
     }
     return reply.code(200).send({ ok: true });
   });

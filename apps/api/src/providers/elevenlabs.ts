@@ -25,56 +25,28 @@ export type ElevenLabsProviderConfig = {
   agentToolSecret: string;
 };
 
-type UploadableSample = {
-  data: NodeJS.ReadableStream;
-  filename: string;
-  contentType: string;
-};
-
 /**
- * The narrow slice of the official ElevenLabs SDK this module actually calls. Depending
- * on this instead of the full `ElevenLabsClient` type keeps the provider trivially
- * testable with a hand-written fake and avoids leaking SDK internals through the
- * provider boundary.
+ * The slice of the official ElevenLabs SDK this module actually calls, expressed as a
+ * `Pick` of the real client class rather than a hand-rolled duck-typed interface — so
+ * `registerCall`, `ivc.create`, and `textToSpeech.convert` are all compiler-checked
+ * against the installed SDK's own request/response types, and the default client below
+ * needs no cast to satisfy it.
  */
-export type ElevenLabsSdkClient = {
-  conversationalAi: {
-    twilio: {
-      registerCall(request: {
-        agentId: string;
-        fromNumber: string;
-        toNumber: string;
-        direction?: ElevenLabs.TelephonyDirection;
-        conversationInitiationClientData?: ElevenLabs.ConversationInitiationClientDataRequestInput;
-      }): Promise<string>;
-    };
-  };
-  voices: {
-    ivc: {
-      create(request: { name: string; files: UploadableSample[] }): Promise<{ voiceId: string }>;
-    };
-  };
-  textToSpeech: {
-    convert(
-      voiceId: string,
-      request: { text: string; modelId: string; outputFormat: string }
-    ): Promise<ReadableStream<Uint8Array>>;
-  };
-};
+export type ElevenLabsSdkClient = Pick<ElevenLabsClient, "conversationalAi" | "voices" | "textToSpeech">;
 
 function createDefaultClient(apiKey: string): ElevenLabsSdkClient {
-  return new ElevenLabsClient({ apiKey }) as unknown as ElevenLabsSdkClient;
+  return new ElevenLabsClient({ apiKey });
 }
 
 /**
  * The exact, server-owned first line the agent speaks — never left to the model to
- * improvise. It discloses up front that the caller is speaking with an AI screening
- * assistant, not the phone's owner.
+ * improvise. It discloses up front that the caller is speaking with an AI assistant and
+ * that the conversation is transcribed, not the phone's owner.
  */
 export function buildFirstDisclosureMessage(input: { ownerName: string; language: ConversationLanguage }): string {
   return input.language === "hi"
-    ? `Namaste, main ${input.ownerName} ka AI call-screening assistant hoon. Kripya bataiye aap kaun hain aur kis wajah se call kar rahe hain.`
-    : `Hi, this is ${input.ownerName}'s AI call-screening assistant. Could you tell me who's calling and why?`;
+    ? `Namaste, aap ${input.ownerName} ke AI call assistant se baat kar rahe hain. Main is screening conversation ko transcribe karta hoon. Kripya apna naam aur call ki wajah bataiye.`
+    : `Hi, you've reached ${input.ownerName}'s AI call assistant. I transcribe this screening conversation. Please tell me your name and what you're calling about.`;
 }
 
 /** Server-owned system prompt for the live screening conversation. */
@@ -136,8 +108,47 @@ export function buildConversationInitiationClientData(input: {
  * back to this server mid-conversation. The server automatically executes the Twilio
  * transfer when this tool's result is CONNECT_TO_USER — the agent never calls a separate
  * transfer tool. Authentication is a static shared secret header.
+ *
+ * `call_id` is deliberately populated from the conversation's own `call_id` dynamic
+ * variable (`dynamicVariable: "call_id"`) rather than described for the LLM to fill in —
+ * that field is mutually exclusive with `description` in ElevenLabs' tool-parameter
+ * schema, so the model has no way to substitute a different call's id. `transcript` stays
+ * LLM-provided (there is nothing else that could supply it) and is constrained to the
+ * caller/assistant turn shape the /agent-tools/screen-call route actually parses.
  */
-export function buildAgentToolDefinitions(config: Pick<ElevenLabsProviderConfig, "publicApiUrl" | "agentToolSecret">) {
+export function buildAgentToolDefinitions(
+  config: Pick<ElevenLabsProviderConfig, "publicApiUrl" | "agentToolSecret">
+): ElevenLabs.ToolRequestModelToolConfig.Webhook[] {
+  const requestBodySchema: ElevenLabs.ObjectJsonSchemaPropertyInput = {
+    type: "object",
+    required: ["call_id", "transcript"],
+    properties: {
+      call_id: {
+        type: "string",
+        dynamicVariable: "call_id"
+      },
+      transcript: {
+        type: "array",
+        description: "The conversation so far, oldest turn first.",
+        items: {
+          type: "object",
+          required: ["speaker", "text"],
+          properties: {
+            speaker: {
+              type: "string",
+              enum: ["assistant", "caller"],
+              description: "Who said this turn."
+            },
+            text: {
+              type: "string",
+              description: "What was said, verbatim."
+            }
+          }
+        }
+      }
+    }
+  };
+
   return [
     {
       type: "webhook",
@@ -147,10 +158,11 @@ export function buildAgentToolDefinitions(config: Pick<ElevenLabsProviderConfig,
       apiSchema: {
         url: `${config.publicApiUrl}/agent-tools/screen-call`,
         method: "POST",
-        requestHeaders: { "X-Agent-Tool-Secret": config.agentToolSecret }
+        requestHeaders: { "X-Agent-Tool-Secret": config.agentToolSecret },
+        requestBodySchema
       }
     }
-  ] as const;
+  ];
 }
 
 /**

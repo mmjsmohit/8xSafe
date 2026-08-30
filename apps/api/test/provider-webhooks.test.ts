@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { getExpectedTwilioSignature } from "twilio";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { blockedCallers, calls, jobs, phoneNumbers, trustedCallers, users, webhookEvents } from "../src/db/schema.js";
+import { resolveTwilioCallbackSid } from "../src/routes/provider-webhooks.js";
 import { buildTestApp, testConfig } from "./support/build-test-app.js";
 import { tableRows, type FakeRow } from "./support/fake-db.js";
 
@@ -24,7 +25,8 @@ const owner: FakeRow = {
   displayName: "Asha",
   forwardingNumber: "+14155550000",
   voiceStatus: "ready",
-  voiceId: "voice-1"
+  voiceId: "voice-1",
+  onboardingCompletedAt: new Date("2026-01-01T00:00:00.000Z")
 };
 
 const phoneNumberRow: FakeRow = { id: "phone-1", ownerId: "owner-1", phoneNumber: "+14155550100", isActive: true };
@@ -268,6 +270,59 @@ describe("POST /webhooks/twilio/inbound", () => {
     );
   });
 
+  it("resolves Hindi/Hinglish from the owner's Indian forwarding number, even though the allocated shield number is a US number", async () => {
+    const ownerWithIndianForwarding: FakeRow = { ...owner, forwardingNumber: "+919876543210" };
+    const { app, mocks } = await buildTestApp({
+      dbSetup: {
+        tables: tableRows([
+          // phoneNumberRow (the shield number) is a US number, +14155550100 — the owner's
+          // forwarding number is the only thing that should decide the language.
+          [phoneNumbers, [phoneNumberRow]],
+          [users, [ownerWithIndianForwarding]],
+          [blockedCallers, []],
+          [trustedCallers, []]
+        ]),
+        insertReturns: tableRows([[calls, [{ id: "call-1" }]]])
+      }
+    });
+    apps.push(app);
+    const params = { CallSid: "CA1", From: "+14155552222", To: "+14155550100" };
+    const response = await app.inject({
+      method: "POST",
+      url: path,
+      ...twilioForm(params),
+      headers: { ...twilioForm(params).headers, "x-twilio-signature": twilioSignature(url, params) }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(mocks.registerCall).toHaveBeenCalledWith(expect.objectContaining({ language: "hi" }));
+  });
+
+  it("treats an owner who hasn't completed onboarding as unavailable, with no provider call", async () => {
+    const ownerNotOnboarded: FakeRow = { ...owner, onboardingCompletedAt: null };
+    const { app, mocks } = await buildTestApp({
+      dbSetup: {
+        tables: tableRows([
+          [phoneNumbers, [phoneNumberRow]],
+          [users, [ownerNotOnboarded]],
+          [blockedCallers, []],
+          [trustedCallers, []]
+        ]),
+        insertReturns: tableRows([[calls, [{ id: "call-1" }]]])
+      }
+    });
+    apps.push(app);
+    const params = { CallSid: "CA1", From: "+14155552222", To: "+14155550100" };
+    const response = await app.inject({
+      method: "POST",
+      url: path,
+      ...twilioForm(params),
+      headers: { ...twilioForm(params).headers, "x-twilio-signature": twilioSignature(url, params) }
+    });
+    expect(response.body).toContain("<Say>");
+    expect(response.body).toContain("<Hangup");
+    expect(mocks.registerCall).not.toHaveBeenCalled();
+  });
+
   it("never re-registers a provider conversation for a duplicate CallSid", async () => {
     const { app, mocks } = await buildTestApp({
       dbSetup: {
@@ -294,6 +349,18 @@ describe("POST /webhooks/twilio/inbound", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("<Hangup");
     expect(mocks.registerCall).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveTwilioCallbackSid", () => {
+  it("prefers ParentCallSid when present — the child leg's own CallSid is not the stored call", () => {
+    expect(resolveTwilioCallbackSid({ CallSid: "child-leg-sid", ParentCallSid: "original-inbound-sid" })).toBe(
+      "original-inbound-sid"
+    );
+  });
+
+  it("falls back to CallSid when there is no ParentCallSid", () => {
+    expect(resolveTwilioCallbackSid({ CallSid: "some-sid" })).toBe("some-sid");
   });
 });
 
@@ -326,6 +393,20 @@ describe("POST /webhooks/twilio/call-status", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(updates).toContainEqual(expect.objectContaining({ table: calls, values: { transferStatus } }));
+  });
+
+  it("accepts a callback that carries ParentCallSid (the child leg's own CallSid differs from the stored call)", async () => {
+    const { app, updates } = await buildTestApp();
+    apps.push(app);
+    const params = { CallSid: "child-leg-sid", CallStatus: "ringing", ParentCallSid: "CA1" };
+    const response = await app.inject({
+      method: "POST",
+      url: path,
+      ...twilioForm(params),
+      headers: { ...twilioForm(params).headers, "x-twilio-signature": twilioSignature(url, params) }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(updates).toContainEqual(expect.objectContaining({ table: calls, values: { transferStatus: "ringing" } }));
   });
 });
 
