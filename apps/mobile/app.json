@@ -23,9 +23,6 @@
       "expo-notifications",
       ["expo-secure-store", { "configureAndroidBackup": true }]
     ],
-    "experiments": { "typedRoutes": true, "reactCompiler": true },
-    "extra": {
-      "eas": { "projectId": "${EXPO_PROJECT_ID}" }
-    }
+    "experiments": { "typedRoutes": true, "reactCompiler": true }
   }
 }
