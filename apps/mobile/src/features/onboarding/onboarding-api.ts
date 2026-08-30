@@ -14,7 +14,8 @@ import { api } from "../../api";
 import { ApiRequestError } from "../../api/client";
 import { tokenStore } from "../../auth/token-store";
 
-const baseUrl = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000";
+const apiOrigin = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000";
+const baseUrl = `${apiOrigin.replace(/\/$/, "")}/v1`;
 
 export type VoiceCloneResponse = z.infer<typeof voiceCloneResponseSchema>;
 export type VoicePreviewResponse = z.infer<typeof voicePreviewResponseSchema>;

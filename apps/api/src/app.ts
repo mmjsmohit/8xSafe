@@ -6,6 +6,8 @@ import rawBody from "fastify-raw-body";
 import type { AppConfig } from "./config.js";
 import type { Database } from "./db/client.js";
 import type { Providers } from "./providers/contracts.js";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerOwnerRoutes } from "./routes/owner.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -42,6 +44,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       return reply.code(503).send({ status: "unavailable" });
     }
   });
+
+  await app.register(registerAuthRoutes, { prefix: "/v1" });
+  await app.register(registerOwnerRoutes, { prefix: "/v1" });
 
   return app;
 }
