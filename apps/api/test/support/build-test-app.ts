@@ -68,7 +68,10 @@ export async function buildTestApp(
   const fake = createFakeDb(input.dbSetup);
   const config = testConfig(input.configOverrides);
   const { providers, mocks } = fakeProviders(input.providerOverrides);
-  const app = await buildApp({ config, db: fake.db as unknown as Database, providers });
+  const app = await buildApp(
+    { config, db: fake.db as unknown as Database, providers },
+    { registerFeatureRoutes: false }
+  );
   for (const plugin of input.plugins ?? DEFAULT_ROUTE_PLUGINS) {
     await app.register(plugin);
   }

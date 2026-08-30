@@ -6,8 +6,10 @@ import rawBody from "fastify-raw-body";
 import type { AppConfig } from "./config.js";
 import type { Database } from "./db/client.js";
 import type { Providers } from "./providers/contracts.js";
+import { agentToolRoutes } from "./routes/agent-tools.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerOwnerRoutes } from "./routes/owner.js";
+import { providerWebhookRoutes } from "./routes/provider-webhooks.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -15,7 +17,10 @@ export type AppDependencies = {
   providers: Providers;
 };
 
-export async function buildApp(dependencies: AppDependencies): Promise<FastifyInstance> {
+export async function buildApp(
+  dependencies: AppDependencies,
+  options: { registerFeatureRoutes?: boolean } = {}
+): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       redact: [
@@ -45,8 +50,12 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     }
   });
 
-  await app.register(registerAuthRoutes, { prefix: "/v1" });
-  await app.register(registerOwnerRoutes, { prefix: "/v1" });
+  if (options.registerFeatureRoutes !== false) {
+    await app.register(registerAuthRoutes, { prefix: "/v1" });
+    await app.register(registerOwnerRoutes, { prefix: "/v1" });
+    await app.register(providerWebhookRoutes);
+    await app.register(agentToolRoutes);
+  }
 
   return app;
 }
