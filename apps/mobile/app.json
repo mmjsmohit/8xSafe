@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Shield Call",
+    "slug": "shield-call",
+    "scheme": "shieldcall",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "app.shieldcall.mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Shield Call uses the microphone to record your voice enrollment sample."
+      }
+    },
+    "android": {
+      "package": "app.shieldcall.mobile",
+      "permissions": ["RECORD_AUDIO", "POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-audio", { "microphonePermission": "Allow Shield Call to record your voice enrollment sample." }],
+      "expo-notifications",
+      ["expo-secure-store", { "configureAndroidBackup": true }]
+    ],
+    "experiments": { "typedRoutes": true },
+    "extra": {
+      "eas": { "projectId": "${EXPO_PROJECT_ID}" }
+    }
+  }
+}
+

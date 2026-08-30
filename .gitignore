@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.expo/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+apps/mobile/web-build/
+apps/mobile/.expo-shared/
+
