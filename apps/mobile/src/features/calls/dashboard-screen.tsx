@@ -13,7 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CallHistoryRow } from "../../components/calls/call-history-row";
 import { MetricsGrid } from "../../components/calls/metrics-grid";
 import { EmptyState, ErrorState, LoadingState } from "../../components/calls/state-views";
-import { getRetryableErrorMessage, shouldShowRetry } from "./error-helpers";
+import { getRetryableErrorMessage, isSessionExpiredError, shouldShowRetry } from "./error-helpers";
 import { useSession } from "../../auth/session";
 import { useCallsHistory } from "./use-calls-history";
 import { useDashboardMetrics } from "./use-dashboard-metrics";
@@ -25,6 +25,8 @@ export function DashboardScreen() {
   const metricsQuery = useDashboardMetrics();
   const callsQuery = useCallsHistory();
   const calls = callsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const sessionExpired =
+    isSessionExpiredError(metricsQuery.error) || isSessionExpiredError(callsQuery.error);
   const isInitialLoading = metricsQuery.isLoading || callsQuery.isLoading;
   const hasBlockingError =
     (metricsQuery.isError && shouldShowRetry(metricsQuery.error, session.state.kind === "signedIn")) ||
@@ -36,6 +38,10 @@ export function DashboardScreen() {
   };
 
   const renderItem = ({ item }: { item: CallListItem }) => <CallHistoryRow call={item} />;
+
+  if (session.state.kind === "signedOut" || sessionExpired) {
+    return <LoadingState label="Redirecting to sign in…" />;
+  }
 
   if (isInitialLoading) {
     return <LoadingState label="Loading your dashboard…" />;

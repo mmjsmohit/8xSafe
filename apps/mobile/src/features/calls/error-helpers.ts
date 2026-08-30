@@ -16,6 +16,10 @@ function asApiError(error: unknown): ApiErrorLike | null {
   };
 }
 
+export function isSessionExpiredError(error: unknown): boolean {
+  return asApiError(error)?.status === 401;
+}
+
 export function getRetryableErrorMessage(error: unknown): string {
   const apiError = asApiError(error);
   if (apiError?.status === 401) return "Your session expired. Sign in again to continue.";
@@ -26,7 +30,6 @@ export function getRetryableErrorMessage(error: unknown): string {
 
 export function shouldShowRetry(error: unknown, isSignedIn: boolean): boolean {
   if (!isSignedIn) return false;
-  const apiError = asApiError(error);
-  if (apiError?.status === 401) return false;
+  if (isSessionExpiredError(error)) return false;
   return true;
 }

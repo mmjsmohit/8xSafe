@@ -9,7 +9,7 @@ import {
 import { EvidenceList, RiskAssessmentCard } from "../../components/calls/risk-evidence";
 import { ErrorState, LoadingState } from "../../components/calls/state-views";
 import { formatCallTimestamp, formatCallerLabel, formatDuration } from "./format";
-import { getRetryableErrorMessage, shouldShowRetry } from "./error-helpers";
+import { getRetryableErrorMessage, isSessionExpiredError, shouldShowRetry } from "./error-helpers";
 import { callCategoryLabels, callOutcomeLabels } from "./labels";
 import { useSession } from "../../auth/session";
 import { useCallDetail } from "./use-call-detail";
@@ -23,6 +23,10 @@ export function CallDetailScreen({ callId }: CallDetailScreenProps) {
   const insets = useSafeAreaInsets();
   const session = useSession();
   const query = useCallDetail(callId);
+
+  if (session.state.kind === "signedOut" || isSessionExpiredError(query.error)) {
+    return <LoadingState label="Redirecting to sign in…" />;
+  }
 
   if (query.isLoading) {
     return <LoadingState label="Loading call details…" />;
