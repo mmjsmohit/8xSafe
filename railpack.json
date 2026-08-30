@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "steps": {
+    "build": {
+      "commands": [
+        "npm run build -w @call-screener/contracts && npm run build -w @call-screener/api"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "npm run start"
+  }
+}
