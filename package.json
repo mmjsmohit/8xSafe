@@ -23,6 +23,7 @@
     "dev:mobile": "npm run start -w @call-screener/mobile",
     "lint": "eslint .",
     "mobile:export": "npm run export -w @call-screener/mobile",
+    "start": "npm run db:migrate -w @call-screener/api && node apps/api/dist/server.js",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck -w @call-screener/contracts && npm run build -w @call-screener/contracts && npm run typecheck -w @call-screener/api && npm run typecheck -w @call-screener/mobile"
   },
