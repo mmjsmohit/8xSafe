@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type PropsWithChildren } from "react";
+import { createContext, use, useEffect, useMemo, useState, type PropsWithChildren } from "react";
 import { tokenStore } from "./token-store";
 
 type SessionState =
@@ -39,8 +39,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
 }
 
 export function useSession(): SessionContextValue {
-  const value = useContext(SessionContext);
+  const value = use(SessionContext);
   if (value === null) throw new Error("useSession must be called inside SessionProvider");
   return value;
 }
-

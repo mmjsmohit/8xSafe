@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fetch } from "expo/fetch";
 
 export type TokenReader = () => Promise<string | null>;
 
@@ -45,4 +46,3 @@ export function createApiClient(input: { baseUrl: string; readAccessToken: Token
 
   return { request };
 }
-
